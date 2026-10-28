@@ -2,7 +2,7 @@
 import logging
 from pathlib import Path
 
-from . import ai, media, subs
+from . import ai, media, reframe, subs
 from . import config as cfg
 
 log = logging.getLogger(__name__)
@@ -87,13 +87,13 @@ def _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, u
         # кадрирование
         local_cuts = [x - c["start"] for x in cuts if c["start"] < x < c["end"]]
         mode = st.get("mode", "auto")
-        shots = None
-        if mode in ("auto", "crop") and info["w"] > info["h"]:
-            ratio, shots = media.face_track(raw, local_cuts, info["w"], info["h"])
-            if mode == "auto":
-                mode = "crop" if ratio >= 0.45 else "blur"
         out = d / f"short_{i}.mp4"
-        media.render(raw, out, "subs.ass", mode, info["w"], info["h"], shots)
+        try:
+            shots = reframe.plan(raw, local_cuts, c["end"] - c["start"], info["w"], info["h"], mode)
+            reframe.render(raw, out, "subs.ass", shots, info["w"], info["h"])
+        except Exception as e:  # запасной простой режим, чтобы клип всё равно получился
+            log.warning("smart reframe failed: %s", e)
+            media.render(raw, out, "subs.ass", "blur", info["w"], info["h"])
         raw.unlink(missing_ok=True)
         r = {"path": out, "title": c.get("title", ""), "start": c["start"],
              "end": c["end"], "mode": mode, "index": i, "total": len(clips)}
