@@ -13,6 +13,9 @@ apt-get update -qq && apt-get install -y -qq ffmpeg fonts-dejavu-core fontconfig
 
 echo "▶ Ставлю Python-библиотеки (1–3 минуты)…"
 pip install -q --root-user-action=ignore -r requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+# OpenCV 5 без детектора лиц — ставим 4.x
+pip uninstall -y -q opencv-python opencv-contrib-python opencv-python-headless >/dev/null 2>&1 || true
+pip install -q --root-user-action=ignore "opencv-python-headless>=4.9,<5"
 export LD_LIBRARY_PATH="$(python3 -c 'import nvidia.cublas.lib as a, nvidia.cudnn.lib as b; print(a.__path__[0]+":"+b.__path__[0])'):${LD_LIBRARY_PATH}"
 
 if [ ! -f .env ]; then

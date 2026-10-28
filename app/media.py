@@ -81,9 +81,14 @@ def extract(src: Path, start: float, end: float, dst: Path):
 
 def face_track(clip: Path, cuts: list[float], src_w: int, src_h: int):
     """Возвращает (доля кадров с лицами, [(время_начала_плана, x_кропа), ...])."""
-    import cv2
+    crop_w = int(src_h * 9 / 16) // 2 * 2
+    center = max(0, src_w - crop_w) // 2
+    try:
+        import cv2
 
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    except Exception:  # нет детектора лиц — используем размытый фон
+        return 0.0, [(0.0, center)]
     cap = cv2.VideoCapture(str(clip))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     step = max(1, int(round(fps / 3)))  # ~3 проверки в секунду
