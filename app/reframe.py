@@ -177,6 +177,14 @@ def plan(clip: Path, cuts: list[float], duration: float, src_w: int, src_h: int,
                     if prev is not None:
                         ts.append(s["t"] - a)
                         xs.append(prev * k)
+        if kind == "fit" and not (ss and with_faces):
+            kind = "track"  # нет лиц и явного движения — всё равно заполняем вертикаль
+            # центр «интереса»: среднее движение по сцене, иначе прошлая позиция/центр
+            mxs = [s["mx"] * k for s in ss if s["mx"] is not None]
+            if mxs:
+                xs, ts = [float(np.median(mxs))], [0.0]
+        if mode == "crop":
+            kind = "track"
         if kind == "track":
             if not xs:  # крупный план без данных — держим прошлую позицию или центр
                 xs, ts = [last_x + crop_w / 2 if last_x is not None else src_w / 2], [0.0]
