@@ -6,6 +6,7 @@ mkdir -p /workspace
 if [ -d "$(dirname "$0")/app" ]; then cd "$(dirname "$0")"; else
   cd /workspace && { [ -d shorts-bot ] || git clone -q https://github.com/Valijan/shorts-bot; } && cd shorts-bot
 fi
+git pull -q 2>/dev/null || true
 
 echo "▶ Ставлю ffmpeg и шрифты…"
 apt-get update -qq && apt-get install -y -qq ffmpeg fonts-dejavu-core fontconfig >/dev/null

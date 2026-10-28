@@ -30,6 +30,17 @@ def transcribe(path, progress=None) -> dict:
         return _transcribe(path, progress)
 
 
+def _load_audio(path) -> np.ndarray:
+    """Звук 16 кГц моно через ffmpeg (без PyAV — у него ломается совместимость)."""
+    import subprocess
+
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000",
+         "-f", "s16le", "-"], capture_output=True, check=True,
+    ).stdout
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def _transcribe(path, progress=None) -> dict:
     global _whisper
     from faster_whisper import WhisperModel
@@ -39,8 +50,9 @@ def _transcribe(path, progress=None) -> dict:
             cfg.WHISPER_MODEL, device=cfg.WHISPER_DEVICE, compute_type=cfg.WHISPER_COMPUTE,
             download_root=str(cfg.DATA_DIR / "models"),
         )
+    audio = _load_audio(path)
     segments, info = _whisper.transcribe(
-        str(path), word_timestamps=True, vad_filter=True, beam_size=1,
+        audio, word_timestamps=True, vad_filter=True, beam_size=1,
     )
     out = []
     for s in segments:
