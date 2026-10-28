@@ -16,6 +16,21 @@ LANG_NAMES = {"ru": "русский", "uz": "узбекский (латиниц�
 # ---------- Речь ----------
 
 def transcribe(path, progress=None) -> dict:
+    """GPU, а если видеокарта не поддерживается — автоматически CPU."""
+    global _whisper
+    try:
+        return _transcribe(path, progress)
+    except Exception as e:
+        if cfg.WHISPER_DEVICE == "cpu":
+            raise
+        log.warning("GPU whisper failed (%s), switching to CPU", e)
+        cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, _whisper = "cpu", "int8", None
+        if cfg.WHISPER_MODEL.startswith("large"):
+            cfg.WHISPER_MODEL = "small"
+        return _transcribe(path, progress)
+
+
+def _transcribe(path, progress=None) -> dict:
     global _whisper
     from faster_whisper import WhisperModel
 
