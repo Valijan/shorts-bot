@@ -42,6 +42,22 @@ docker compose up -d --build
 
 Первый запуск занимает несколько минут: скачивается модель Whisper.
 
+## 🚀 Запуск на RunPod (GPU — быстро, оплата только за время работы)
+
+1. RunPod → **Pods → Deploy**: GPU **RTX 4090 / RTX A5000** (Community Cloud), шаблон **RunPod PyTorch** (CUDA 12), **Volume Disk 30 ГБ**.
+2. Открой **Connect → Web Terminal** и вставь:
+   ```bash
+   cd /workspace && git clone https://github.com/Valijan/shorts-bot && cd shorts-bot && bash runpod.sh
+   ```
+3. Ответь на вопросы (токен бота и т.д.) — бот запустится.
+4. Закончил работу — **Stop** pod (платишь только за диск, копейки). Следующий запуск:
+   ```bash
+   cd /workspace/shorts-bot && git pull && bash runpod.sh
+   ```
+
+На RunPod бот работает через обычный API Telegram: файлы **до 20 МБ**, большие видео присылай **ссылкой**.
+Распознавание на GPU (`large-v3`): ~3–5 минут на час видео.
+
 ## Пользование
 
 - `/start` — приветствие
