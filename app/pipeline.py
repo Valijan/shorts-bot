@@ -10,9 +10,10 @@ log = logging.getLogger(__name__)
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
 
 
-def process(src: Path, workdir: Path, st: dict, progress) -> list[dict]:
+def process(src: Path, workdir: Path, st: dict, progress, on_clip=None) -> list[dict]:
     """st: {"clips": int, "subs": "orig|ru|uz|en|none", "mode": "auto|crop|blur", "length": key}"""
     n = int(st.get("clips", 5))
+    seq = st.get("pick", "best") == "seq"
     lmin, lmax = LENGTHS.get(st.get("length", "mid"), (30, 45))
     sub_lang = st.get("subs", "orig")
     use_llm = bool(cfg.ANTHROPIC_API_KEY)
@@ -22,7 +23,7 @@ def process(src: Path, workdir: Path, st: dict, progress) -> list[dict]:
     dur = info["duration"]
 
     segments, lang = [], None
-    if info["audio"] and (sub_lang != "none" or use_llm):
+    if info["audio"] and (sub_lang != "none" or (use_llm and not seq)):
         progress("📝 Распознаю речь… 0%")
         tr = ai.transcribe(src, lambda p: progress(f"📝 Распознаю речь… {int(p * 100)}%"))
         segments, lang = tr["segments"], tr["lang"]
@@ -31,7 +32,20 @@ def process(src: Path, workdir: Path, st: dict, progress) -> list[dict]:
     cuts = media.detect_cuts(src)
     loud = media.loudness_per_sec(src) if info["audio"] else []
 
-    progress("🎯 Выбираю лучшие моменты…")
+    if seq:
+        clips = ai.split_sequential(dur, segments, cuts, lmin, lmax)
+        if n:
+            clips = clips[:n]
+    else:
+        clips = _pick_best(dur, loud, cuts, segments, n or 5, lmin, lmax, sub_lang, lang, use_llm)
+    if not clips:
+        raise RuntimeError("Не удалось найти подходящие фрагменты")
+    return _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, use_llm,
+                       progress, on_clip)
+
+
+def _pick_best(dur, loud, cuts, segments, n, lmin, lmax, sub_lang, lang, use_llm):
+    progress = lambda *_: None
     title_lang = sub_lang if sub_lang in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
     clips = []
     if use_llm and segments:
@@ -43,9 +57,11 @@ def process(src: Path, workdir: Path, st: dict, progress) -> list[dict]:
         clips = ai.pick_heuristic(dur, loud, cuts, segments, n, lmin, lmax)
     clips = ai.snap(clips, segments, cuts, dur, lmin, lmax)[:n]
     clips.sort(key=lambda c: c["start"])
-    if not clips:
-        raise RuntimeError("Не удалось найти подходящие фрагменты")
+    return clips
 
+
+def _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, use_llm,
+                progress, on_clip):
     results = []
     for i, c in enumerate(clips, 1):
         progress(f"🎬 Монтирую клип {i}/{len(clips)}…")
@@ -79,6 +95,11 @@ def process(src: Path, workdir: Path, st: dict, progress) -> list[dict]:
         out = d / f"short_{i}.mp4"
         media.render(raw, out, "subs.ass", mode, info["w"], info["h"], shots)
         raw.unlink(missing_ok=True)
-        results.append({"path": out, "title": c.get("title", ""), "start": c["start"],
-                        "end": c["end"], "mode": mode})
-    return results
+        r = {"path": out, "title": c.get("title", ""), "start": c["start"],
+             "end": c["end"], "mode": mode, "index": i, "total": len(clips)}
+        if on_clip:
+            on_clip(r)  # отправляем сразу и удаляем, чтобы не копить на диске
+            out.unlink(missing_ok=True)
+        else:
+            results.append(r)
+    return results if not on_clip else [None] * len(clips)

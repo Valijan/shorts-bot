@@ -195,3 +195,27 @@ def snap(clips, segments, cuts, duration, lmin, lmax) -> list[dict]:
         if all(c["end"] <= f["start"] or c["start"] >= f["end"] for f in final):
             final.append(c)
     return final
+
+
+def split_sequential(duration, segments, cuts, lmin, lmax) -> list[dict]:
+    """Режет видео подряд на части ~lmax секунд, конец части — на паузе в речи."""
+    ends = sorted({s["e"] for s in segments} | set(cuts))
+    words = [(w["s"], w["e"]) for s in segments for w in (s.get("words") or [])]
+
+    def inside_word(t):
+        return any(a < t < b for a, b in words)
+
+    out, t, i = [], 0.0, 1
+    while duration - t > 3:
+        target = t + lmax
+        if target >= duration:
+            e = duration
+        else:
+            cands = [x for x in ends if t + lmin <= x <= target]
+            e = max(cands) if cands else target
+            if not cands and inside_word(e):  # нет паузы — режем перед словом
+                starts = [a for a, b in words if t + lmin <= a <= target]
+                e = max(starts) if starts else target
+        out.append({"start": t, "end": e, "title": f"Часть {i}", "score": 0})
+        t, i = e, i + 1
+    return out

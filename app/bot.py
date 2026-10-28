@@ -34,14 +34,15 @@ queue: asyncio.Queue = asyncio.Queue()
 # ---------- Настройки пользователя ----------
 
 SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
-DEFAULTS = {"clips": 5, "subs": "orig", "mode": "auto", "length": "mid"}
+DEFAULTS = {"clips": 5, "subs": "orig", "mode": "auto", "length": "mid", "pick": "best"}
 OPTIONS = {
-    "clips": [("3", 3), ("5", 5), ("8", 8), ("10", 10)],
+    "pick": [("🔥 Лучшие моменты", "best"), ("📼 По порядку", "seq")],
+    "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
     "subs": [("Оригинал", "orig"), ("RU", "ru"), ("UZ", "uz"), ("EN", "en"), ("Нет", "none")],
     "mode": [("Авто", "auto"), ("Кроп по лицу", "crop"), ("С размытым фоном", "blur")],
 }
-TITLES = {"clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16"}
+TITLES = {"pick": "Как резать", "clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16"}
 
 
 def load_all() -> dict:
@@ -77,8 +78,10 @@ def settings_kb(uid: int) -> InlineKeyboardMarkup:
 def settings_text(uid: int) -> str:
     st = get_settings(uid)
     names = {k: dict((v, l) for l, v in OPTIONS[k]) for k in OPTIONS}
+    clips = "все" if st["clips"] == 0 else st["clips"]
     return ("⚙️ <b>Настройки</b>\n"
-            f"Клипов: {st['clips']} · Длина: {names['length'][st['length']]}\n"
+            f"Режим: {names['pick'][st['pick']]}\n"
+            f"Клипов: {clips} · Длина: {names['length'][st['length']]}\n"
             f"Субтитры: {names['subs'][st['subs']]} · Кадр: {names['mode'][st['mode']]}")
 
 
@@ -95,6 +98,7 @@ class AccessMiddleware(BaseMiddleware):
 
 
 # ---------- Команды ----------
+
 
 @router.message(CommandStart())
 async def start(m: Message):
@@ -128,6 +132,9 @@ async def on_set(c: CallbackQuery):
     if key == "clips":
         val = int(val)
     set_setting(c.from_user.id, key, val)
+    if key == "pick" and val == "seq":  # по порядку: всё видео частями до минуты
+        set_setting(c.from_user.id, "clips", 0)
+        set_setting(c.from_user.id, "length", "long")
     try:
         await c.message.edit_text(settings_text(c.from_user.id), reply_markup=settings_kb(c.from_user.id))
     except TelegramBadRequest:
@@ -227,20 +234,23 @@ async def worker(bot: Bot):
                     await bot.download_file(tg_file.file_path, destination=src)
 
             st = get_settings(job["uid"])
-            results = await asyncio.to_thread(process, src, workdir, st, progress)
 
-            await set_status(f"📤 Отправляю {len(results)} клип(ов)…", force=True)
-            for i, r in enumerate(results, 1):
-                cap = (f"<b>{i}. {r['title'] or 'Клип'}</b>\n"
+            async def send_clip(r):
+                cap = (f"<b>{r['title'] or 'Клип ' + str(r['index'])}</b>\n"
                        f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n\n#shorts")
                 if r["path"].stat().st_size > UPLOAD_LIMIT:
-                    await bot.send_message(chat, f"Клип {i} слишком большой для отправки.")
-                    continue
+                    await bot.send_message(chat, f"Клип {r['index']} слишком большой для отправки.")
+                    return
                 await bot.send_video(
                     chat, FSInputFile(r["path"]), caption=cap, width=1080, height=1920,
                     duration=int(r["end"] - r["start"]), supports_streaming=True,
                     request_timeout=600,
                 )
+
+            def on_clip(r):
+                asyncio.run_coroutine_threadsafe(send_clip(r), loop).result()
+
+            results = await asyncio.to_thread(process, src, workdir, st, progress, on_clip)
             await set_status(f"✅ Готово! {len(results)} шортс(ов).", force=True)
         except Exception as e:
             log.exception("job failed")
