@@ -71,7 +71,7 @@ def _words_from_segments(segments, max_words=3):
 
 
 def build_ass(path, segments, start: float, end: float, title: str = "",
-              word_level: bool = True, upper: bool = True):
+              word_level: bool = True, upper: bool = True, overlay=None, mute=None):
     """segments — сегменты с абсолютным временем; start/end — границы клипа."""
     dur = end - start
     if word_level:
@@ -82,6 +82,10 @@ def build_ass(path, segments, start: float, end: float, title: str = "",
         {"s": max(0.0, w["s"] - start), "e": min(dur, w["e"] - start), "w": w["w"].strip()}
         for w in words if w["e"] > start and w["s"] < end and w["w"].strip()
     ]
+    if mute:  # во время озвучки показываем её текст вместо оригинальных реплик
+        words = [w for w in words if not any(a < (w["s"] + w["e"]) / 2 < b for a, b in mute)]
+    if overlay:
+        words = sorted(words + [dict(w, voice=True) for w in overlay], key=lambda w: w["s"])
     lines = []
     if cfg.SHOW_TITLE and title:
         lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Title,,0,0,0,,{_esc(title)}")

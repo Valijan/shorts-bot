@@ -2,7 +2,7 @@
 import logging
 from pathlib import Path
 
-from . import ai, media, reframe, subs
+from . import ai, media, reframe, review, subs
 from . import config as cfg
 
 log = logging.getLogger(__name__)
@@ -82,18 +82,33 @@ def _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, u
                     word_level = False
                 except Exception as e:
                     log.warning("translate failed: %s", e)
-        subs.build_ass(d / "subs.ass", seg_in, c["start"], c["end"], c.get("title", ""), word_level)
+        inserts = []
+        if st.get("review") == "on" and use_llm:
+            progress(f"🎙 Пишу и озвучиваю комментарий {i}/{len(clips)}…")
+            vlang = sub_lang if sub_lang in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
+            try:
+                inserts = review.prepare(segments, c["start"], c["end"], vlang, d)
+            except Exception as e:
+                log.warning("review failed: %s", e)
+        subs.build_ass(d / "subs.ass", seg_in, c["start"], c["end"], c.get("title", ""), word_level,
+                       overlay=review.overlay_words(inserts), mute=review.windows(inserts))
 
         # кадрирование
         local_cuts = [x - c["start"] for x in cuts if c["start"] < x < c["end"]]
         mode = st.get("mode", "auto")
         out = d / f"short_{i}.mp4"
+        final = out
+        if inserts:
+            out = d / "video_only.mp4"
         try:
             shots = reframe.plan(raw, local_cuts, c["end"] - c["start"], info["w"], info["h"], mode)
             reframe.render(raw, out, "subs.ass", shots, info["w"], info["h"])
         except Exception as e:  # запасной простой режим, чтобы клип всё равно получился
             log.warning("smart reframe failed: %s", e)
             media.render(raw, out, "subs.ass", "blur", info["w"], info["h"])
+        if inserts:
+            review.mix(out, inserts, final)
+            out = final
         raw.unlink(missing_ok=True)
         r = {"path": out, "title": c.get("title", ""), "start": c["start"],
              "end": c["end"], "mode": mode, "index": i, "total": len(clips)}

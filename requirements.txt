@@ -7,3 +7,4 @@ opencv-python-headless>=4.9,<5
 numpy
 scenedetect>=0.6.4
 python-dotenv
+edge-tts>=7

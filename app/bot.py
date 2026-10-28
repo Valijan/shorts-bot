@@ -34,15 +34,17 @@ queue: asyncio.Queue = asyncio.Queue()
 # ---------- Настройки пользователя ----------
 
 SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
-DEFAULTS = {"clips": 5, "subs": "orig", "mode": "auto", "length": "mid", "pick": "best"}
+DEFAULTS = {"clips": 5, "subs": "orig", "mode": "auto", "length": "mid", "pick": "best",
+            "review": "off"}
 OPTIONS = {
     "pick": [("🔥 Лучшие моменты", "best"), ("📼 По порядку", "seq")],
     "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
     "subs": [("Оригинал", "orig"), ("RU", "ru"), ("UZ", "uz"), ("EN", "en"), ("Нет", "none")],
     "mode": [("Авто", "auto"), ("Кроп по лицу", "crop"), ("С размытым фоном", "blur")],
+    "review": [("Выкл", "off"), ("🎙 Вкл", "on")],
 }
-TITLES = {"pick": "Как резать", "clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16"}
+TITLES = {"pick": "Как резать", "clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16", "review": "Обзор: ИИ-комментарий с озвучкой"}
 
 
 def load_all() -> dict:
@@ -82,7 +84,8 @@ def settings_text(uid: int) -> str:
     return ("⚙️ <b>Настройки</b>\n"
             f"Режим: {names['pick'][st['pick']]}\n"
             f"Клипов: {clips} · Длина: {names['length'][st['length']]}\n"
-            f"Субтитры: {names['subs'][st['subs']]} · Кадр: {names['mode'][st['mode']]}")
+            f"Субтитры: {names['subs'][st['subs']]} · Кадр: {names['mode'][st['mode']]}\n"
+            f"Обзор с озвучкой: {names['review'][st['review']]}")
 
 
 # ---------- Доступ ----------
@@ -234,6 +237,9 @@ async def worker(bot: Bot):
                     await bot.download_file(tg_file.file_path, destination=src)
 
             st = get_settings(job["uid"])
+            if st.get("review") == "on" and not cfg.ANTHROPIC_API_KEY:
+                await bot.send_message(chat, "⚠️ Для режима «Обзор» нужен ключ Claude API "
+                                             "(ANTHROPIC_API_KEY). Режу без комментариев.")
 
             async def send_clip(r):
                 cap = (f"<b>{r['title'] or 'Клип ' + str(r['index'])}</b>\n"
