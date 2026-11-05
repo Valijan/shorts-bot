@@ -50,7 +50,8 @@ def _header(style=None) -> str:
     if st.get("sub_y") and st.get("pos", "bottom") == "bottom":
         mv = 1920 - st["sub_y"]
     hook_v = st.get("banner_y", 300) + 34
-    bar_v = st.get("bar_y", 0) + 14
+    bar_v = st.get("bar_y", 0) + (6 if st.get("camp") else 14)
+    bar_size = 68 if st.get("camp") else 56
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -64,8 +65,9 @@ Style: Sub,{f},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,1
 Style: Title,{f},66,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,8,80,80,230,1
 Style: Mark,{f},40,&H60FFFFFF,&H000000FF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,60,60,90,1
 Style: Hook,{f},90,&H00000000,&H000000FF,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,1,0,0,8,50,50,{hook_v},1
+Style: Camp,{f},66,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,2,8,40,40,150,1
 Style: Box,{f},20,&H00FFFFFF,&H000000FF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
-Style: Bar,{f},56,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,8,40,40,{bar_v},1
+Style: Bar,{f},{bar_size},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,8,40,40,{bar_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -160,10 +162,14 @@ def build_ass(path, segments, start: float, end: float, title: str = "",
         lines.append(f"Dialogue: 3,{_ts(0)},{_ts(hook_end)},Hook,,0,0,0,,{txt}")
     for a, b, text in labels or []:
         lines.append(f"Dialogue: 1,{_ts(a)},{_ts(b)},Title,,0,0,0,,{_esc(text)}")
-    mark = st.get("mark") or cfg.WATERMARK
-    if mark and st.get("bar_y"):  # полоса с ником под веб-камерой
+    camp = st.get("camp")
+    mark = camp or st.get("mark") or cfg.WATERMARK
+    if mark and st.get("bar_y"):  # полоса с ником/каналом под веб-камерой
         nick = _esc(mark.lstrip("@").upper())
-        lines.append(f"Dialogue: 1,{_ts(hook_end)},{_ts(dur)},Bar,,0,0,0,,{{\\c&HFF4D9F&}}▶ {{\\c&HFFFFFF&}}{nick}")
+        start = 0.0 if camp else hook_end  # надпись кампании видна всё видео
+        lines.append(f"Dialogue: 1,{_ts(start)},{_ts(dur)},Bar,,0,0,0,,{{\\c&HFF4D9F&}}▶ {{\\c&HFFFFFF&}}{nick}")
+    elif camp:  # без веб-камеры — крупно сверху
+        lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Camp,,0,0,0,,{_esc(camp.upper())}")
     elif mark:
         lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Mark,,0,0,0,,{_esc(mark)}")
 

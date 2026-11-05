@@ -44,7 +44,8 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
             "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
             "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto", "pbar": "auto",
-            "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on"}
+            "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on",
+            "camp_label": "", "camp_tags": ""}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
@@ -194,6 +195,7 @@ HELP = (
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
+    "/campaign Канал #тег — клиппинг-кампания (канал крупно + теги)\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
     "/stop — выключить сервер сейчас · /id — твой ID"
 )
@@ -231,6 +233,31 @@ async def watermark(m: Message):
                               "Убрать: <code>/watermark off</code>")
     set_setting(m.from_user.id, "mark", val)
     await m.answer(f"✅ Ник на видео: {html.escape(val) or 'убран'}")
+
+
+@router.message(Command("campaign"))
+async def campaign(m: Message):
+    """/campaign Oneshotmlbb #oneshotmlbb #ваншотмлбб — надпись канала на всё видео + обязательные теги."""
+    parts = (m.text or "").split()[1:]
+    uid = m.from_user.id
+    if parts and parts[0].lower() in ("off", "выкл", "нет", "-"):
+        set_setting(uid, "camp_label", "")
+        set_setting(uid, "camp_tags", "")
+        return await m.answer("✅ Кампания выключена.")
+    if not parts:
+        st = get_settings(uid)
+        cur = (f"Сейчас: <b>{html.escape(st['camp_label'])}</b> {html.escape(st['camp_tags'])}"
+               if st["camp_label"] else "Сейчас кампании нет.")
+        return await m.answer(cur + "\n\nПример:\n<code>/campaign Oneshotmlbb #oneshotmlbb #ваншотмлбб</code>\n"
+                              "Название канала будет крупно на всём видео, теги — первыми в тексте публикации.\n"
+                              "Выключить: <code>/campaign off</code>")
+    tags = " ".join(p for p in parts if p.startswith("#"))
+    name = " ".join(p for p in parts if not p.startswith("#"))[:30]
+    label = name if name.lower().startswith(("twitch", "kick", "youtube")) else f"TWITCH: {name}"
+    set_setting(uid, "camp_label", label)
+    set_setting(uid, "camp_tags", tags)
+    await m.answer(f"✅ Кампания: на видео будет <b>{html.escape(label.upper())}</b>\n"
+                   f"Теги: {html.escape(tags) or 'нет'}\n\nТеперь присылай стримы этого автора.")
 
 
 @router.message(Command("music"))
@@ -632,9 +659,9 @@ def caption_for(r: dict, st: dict, segments, lang) -> str:
             + (f"{kind}\n" if kind else "")
             + (f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n" if not r.get("text") else ""))
     if st.get("pubtext") != "on":
-        return head + "\n" + TAGS.get(r.get("content", "auto"), "#shorts")
+        return head + "\n" + (st.get("camp_tags", "") + " " + TAGS.get(r.get("content", "auto"), "#shorts")).strip()
     lang = st["subs"] if st["subs"] in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
-    p = ai.publish_text(r, segments, r.get("content", "auto"), lang)
+    p = ai.publish_text(r, segments, r.get("content", "auto"), lang, st.get("camp_tags", ""))
     body = (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
             f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
             f"<code>{html.escape(p['desc'])}\n\n{html.escape(p['tags'])}</code>")

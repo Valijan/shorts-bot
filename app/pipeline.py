@@ -40,14 +40,16 @@ def style_of(st: dict, lay: dict | None = None) -> dict:
     style = {"color": st.get("sub_color", "yellow"), "size": st.get("sub_size", "m"),
              "pos": st.get("sub_pos", "bottom"), "title": t if t in ("on", "off", "hook") else "hook",
              "mark": st.get("mark", ""), "words": 1 if one else 3,
-             "censor": st.get("censor", "off") == "on", "anim": st.get("sub_anim", "pop")}
+             "censor": st.get("censor", "off") == "on", "anim": st.get("sub_anim", "pop"),
+             "camp": st.get("camp_label", "")}
     if lay and lay.get("layout") == "stream":   # камера сверху, полоса с ником, геймплей
         top = lay["cam_h"] + lay["bar_h"]
-        style.update(banner_y=lay["cam_h"], sub_y=1360)
+        below_bar = lay["bar_h"] and st.get("camp_label")
+        style.update(banner_y=lay["cam_h"] + (lay["bar_h"] if below_bar else 0), sub_y=1360)
         if lay["bar_h"]:
             style["bar_y"] = lay["cam_h"]
     elif lay:                                   # камера во весь экран
-        style.update(banner_y=300, sub_y=1320)
+        style.update(banner_y=330 if st.get("camp_label") else 300, sub_y=1320)
     return style
 
 
@@ -331,7 +333,7 @@ def _game_layout(raw, c, info, st):
     try:
         lay = gamecam.plan(raw, c["end"] - c["start"], info["w"], info["h"], st.get("content", "mlbb"),
                            use_ai=st.get("director", "on") == "on", events=c.get("fx_t", []),
-                           bar=bool(st.get("mark")))
+                           bar=bool(st.get("mark") or st.get("camp_label")))
         log.info("gamecam: %s, ai=%s, shots=%d", lay["layout"], lay["ai"], len(lay["shots"]))
         return lay
     except Exception as e:

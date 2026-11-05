@@ -380,8 +380,16 @@ _BASE_TAGS = {
 _TYPE_WORD = {"kill": "килл-момент", "tip": "полезный совет", "funny": "смешной момент"}
 
 
-def publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
+def publish_text(clip: dict, segments, content: str, lang: str = "ru", must_tags: str = "") -> dict:
     """Название, описание и хэштеги для YouTube Shorts / TikTok / Reels."""
+    res = _publish_text(clip, segments, content, lang)
+    if must_tags:  # обязательные теги кампании — всегда первыми
+        rest = [t for t in res["tags"].split() if t.lower() not in must_tags.lower().split()]
+        res["tags"] = " ".join(must_tags.split() + rest)
+    return res
+
+
+def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
     tags = _BASE_TAGS.get(content, _BASE_TAGS["auto"])
     fallback_title = clip.get("title") or {"mlbb": "Этот момент в MLBB 🔥", "pubg": "Жёсткий момент в PUBG Mobile",
                                            "movie": "Лучший момент фильма"}.get(content, "Смотри до конца 👀")
