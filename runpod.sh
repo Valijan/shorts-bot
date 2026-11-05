@@ -59,12 +59,12 @@ if [ -n "${TG_API_ID:-}" ] && [ -n "${TG_API_HASH:-}" ]; then
     curl -s "https://api.telegram.org/bot${TOKEN}/logOut" >/dev/null && touch /workspace/.tg_logged_out
   fi
   mkdir -p /workspace/tba-data
-  pkill -f telegram-bot-api 2>/dev/null || true
+  pkill -f telegram-bot-api 2>/dev/null || true; sleep 1
   nohup "$BIN" --local --api-id="$TG_API_ID" --api-hash="$TG_API_HASH" \
-    --dir=/workspace/tba-data --http-port=8081 > /workspace/tba.log 2>&1 &
+    --dir=/workspace/tba-data --http-port=18081 > /workspace/tba.log 2>&1 &
   sleep 3
-  grep -q '^BOT_API_URL=' .env 2>/dev/null && sed -i 's|^BOT_API_URL=.*|BOT_API_URL=http://127.0.0.1:8081|' .env \
-    || echo "BOT_API_URL=http://127.0.0.1:8081" >> .env
+  grep -q '^BOT_API_URL=' .env 2>/dev/null && sed -i 's|^BOT_API_URL=.*|BOT_API_URL=http://127.0.0.1:18081|' .env \
+    || echo "BOT_API_URL=http://127.0.0.1:18081" >> .env
   echo "✅ Свой Bot API запущен — бот принимает файлы до 2 ГБ"
 fi
 
