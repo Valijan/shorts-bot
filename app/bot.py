@@ -43,7 +43,7 @@ SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
 DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "mid", "confirm": "off",
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
             "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
-            "pubtext": "on", "mark": "", "director": "on"}
+            "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto"}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
@@ -64,6 +64,8 @@ OPTIONS = {
     "music": [("Без музыки", "off"), ("🎵 С музыкой", "on")],
     "review": [("Выкл", "off"), ("🎙 Вкл", "on")],
     "pubtext": [("📋 Вкл", "on"), ("Выкл", "off")],
+    "jumpcut": [("Авто", "auto"), ("✂️ Всегда", "on"), ("Выкл", "off")],
+    "teaser": [("Авто (игры)", "auto"), ("🎯 Всегда", "on"), ("Выкл", "off")],
     "autostop": [("Выкл", 0), ("15 мин", 15), ("30 мин", 30), ("60 мин", 60)],
 }
 TITLES = {"content": "Что за видео", "pick": "Как резать", "clips": "Сколько клипов",
@@ -73,14 +75,29 @@ TITLES = {"content": "Что за видео", "pick": "Как резать", "c
           "sub_words": "Слов в субтитре", "fx": "Эффекты на килах",
           "music": "Фоновая музыка (/music)", "review": "Обзор: ИИ-комментарий с озвучкой",
           "pubtext": "Текст для публикации",
+          "jumpcut": "Убирать паузы в речи", "teaser": "Тизер: яркий момент в начале",
           "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
     "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm"]),
     "look": ("🎨 Оформление", ["mode", "director", "title", "subs", "sub_words", "sub_color", "sub_size", "sub_pos"]),
-    "fx": ("✨ Эффекты и звук", ["fx", "music", "review", "pubtext"]),
+    "fx": ("✨ Эффекты и звук", ["fx", "jumpcut", "teaser", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
 }
 GLOBAL_KEYS = {"autostop"}
+PRESETS = {
+    "mlbb": ("⚔️ MLBB-стрим", {"content": "mlbb", "pick": "best", "length": "mid", "mode": "game",
+                               "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
+                               "jumpcut": "auto", "teaser": "on", "director": "on"}),
+    "pubg": ("🔫 PUBG-стрим", {"content": "pubg", "pick": "best", "length": "mid", "mode": "game",
+                               "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
+                               "jumpcut": "auto", "teaser": "on", "director": "on"}),
+    "movie": ("🎥 Фильм", {"content": "movie", "pick": "best", "length": "long", "mode": "auto",
+                          "title": "hook", "sub_words": "3", "fx": "off", "jumpcut": "off",
+                          "teaser": "off"}),
+    "talk": ("🎙 Разговорное", {"content": "auto", "pick": "best", "length": "mid", "mode": "auto",
+                               "title": "hook", "sub_words": "3", "fx": "off", "jumpcut": "on",
+                               "teaser": "off"}),
+}
 
 
 def load_all() -> dict:
@@ -110,8 +127,11 @@ def _label(key, val):
 
 
 def menu_kb() -> InlineKeyboardMarkup:
+    presets = [InlineKeyboardButton(text=t, callback_data=f"preset:{k}") for k, (t, _) in PRESETS.items()]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=title, callback_data=f"menu:{k}")] for k, (title, _) in MENUS.items()
+        [InlineKeyboardButton(text="— 🎛 Пресет в одну кнопку —", callback_data="noop")],
+        presets[:2], presets[2:],
+        *[[InlineKeyboardButton(text=title, callback_data=f"menu:{k}")] for k, (title, _) in MENUS.items()],
     ])
 
 
@@ -278,6 +298,19 @@ async def on_menu(c: CallbackQuery):
     except TelegramBadRequest:
         pass
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("preset:"))
+async def on_preset(c: CallbackQuery):
+    name, vals = PRESETS[c.data.split(":", 1)[1]]
+    for k, v in vals.items():
+        set_setting(c.from_user.id, k, v)
+    try:
+        await c.message.edit_text(f"✅ Пресет «{name}»\n\n" + settings_text(c.from_user.id),
+                                  reply_markup=menu_kb())
+    except TelegramBadRequest:
+        pass
+    await c.answer(f"Пресет {name}")
 
 
 @router.callback_query(F.data.startswith("set:"))

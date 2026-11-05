@@ -187,3 +187,31 @@ def motion_per_sec(path: Path) -> np.ndarray:
     n = len(per_frame) // fps + 1
     a = np.resize(np.array(per_frame + [0.0] * fps), n * fps)[: n * fps]
     return a.reshape(n, fps).max(axis=1)
+
+
+def jumpcut(src: Path, keep: list[tuple[float, float]], dst: Path):
+    """Оставляет только куски keep (секунды), остальное (паузы) вырезает."""
+    expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(src),
+        "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
+        "-af", f"aselect='{expr}',asetpts=N/SR/TB",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
+        str(dst),
+    ])
+
+
+def teaser(src: Path, at: float, dst: Path, length: float = 1.5):
+    """Ставит в начало самый яркий момент (at, с) + белую вспышку-переход."""
+    a = max(0.0, at - length * 0.55)
+    b = a + length
+    g = (f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,"
+         f"fade=t=out:st={length - 0.12:.3f}:d=0.12:color=white[tv];"
+         f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[ta];"
+         f"[0:v]fade=t=in:st=0:d=0.15:color=white[mv];"
+         f"[tv][ta][mv][0:a]concat=n=2:v=1:a=1[v][a]")
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(src), "-filter_complex", g,
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
+    ])

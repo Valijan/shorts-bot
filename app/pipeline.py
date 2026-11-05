@@ -152,8 +152,19 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
         d.mkdir(exist_ok=True)
         raw = d / "raw.mp4"
         media.extract(src, c["start"], c["end"], raw)
+        seg_src, c = segments, dict(c)
+        keep = _keep_intervals(c, segments, st, info)
+        if keep:
+            progress(f"✂️ Убираю паузы {i}/{len(clips)}…")
+            try:
+                cut = d / "cut.mp4"
+                media.jumpcut(raw, keep, cut)
+                cut.replace(raw)
+                seg_src, c = _remap(c, segments, keep)
+            except Exception as e:
+                log.warning("jumpcut failed: %s", e)
 
-        seg_in = [s for s in segments if s["e"] > c["start"] and s["s"] < c["end"]]
+        seg_in = [s for s in seg_src if s["e"] > c["start"] and s["s"] < c["end"]]
         word_level = True
         if sub_lang == "none":
             seg_in = []
@@ -175,17 +186,20 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
         subs.build_ass(d / "subs.ass", seg_in, c["start"], c["end"], c.get("title", ""), word_level,
                        overlay=review.overlay_words(inserts), mute=review.windows(inserts),
                        style=style_of(st, lay), labels=c.get("labels"))
-        local_cuts = c.get("cuts") or [x - c["start"] for x in cuts if c["start"] < x < c["end"]]
+        local_cuts = c.get("cuts") or ([] if "orig_start" in c else
+                                       [x - c["start"] for x in cuts if c["start"] < x < c["end"]])
         out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st, lay)
         if inserts:
             mixed = d / "mixed.mp4"
             review.mix(out, inserts, mixed)
             out = mixed
         out = _finish(out, d, c, st, info, progress, i, len(clips))
+        out = _teaser(out, d, c, st, info)
         final = d / f"short_{i}.mp4"
         out.replace(final)
         raw.unlink(missing_ok=True)
-        r = {"path": final, "title": c.get("title", ""), "start": c["start"], "end": c["end"],
+        r = {"path": final, "title": c.get("title", ""), "start": c.get("orig_start", c["start"]),
+             "end": c.get("orig_end", c["end"]),
              "type": c.get("type", ""), "content": content, "index": i, "total": len(clips),
              "text": c.get("text", "")}
         if on_clip:
@@ -193,6 +207,80 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
             final.unlink(missing_ok=True)
         results.append(r)
     return results
+
+
+def _keep_intervals(c, segments, st, info):
+    """Куски клипа без пауз (время от начала клипа). None — резать нечего."""
+    mode = st.get("jumpcut", "auto")
+    if mode == "off" or not info["audio"] or c.get("labels") or st.get("review") == "on":
+        return None
+    L = c["end"] - c["start"]
+    words = sorted((max(0.0, w["s"] - c["start"]), min(L, w["e"] - c["start"]))
+                   for s in segments for w in (s.get("words") or [])
+                   if w["e"] > c["start"] and w["s"] < c["end"])
+    speech = sum(b - a for a, b in words)
+    if not words or (mode == "auto" and speech < L * 0.35):
+        return None  # почти без речи — это экшен, не трогаем
+    protect = [(t - 2.0, t + 2.0) for t in c.get("fx_t", [])]  # вокруг килов ничего не режем
+    pad, gap_min = 0.15, 0.6
+    keep, cur = [], [0.0, min(L, words[0][1] + pad)]
+    for a, b in words[1:]:
+        gap = (cur[1], a - pad)
+        in_fx = any(not (gap[1] <= p or gap[0] >= q) for p, q in protect)
+        if gap[1] - gap[0] >= gap_min and not in_fx:
+            keep.append(tuple(cur))
+            cur = [max(0.0, a - pad), min(L, b + pad)]
+        else:
+            cur[1] = min(L, max(cur[1], b + pad))
+    cur[1] = L if L - cur[1] < 1.0 else cur[1] + 0.3
+    keep.append(tuple(cur))
+    removed = L - sum(b - a for a, b in keep)
+    return keep if removed >= 1.0 else None
+
+
+def _remap(c, segments, keep):
+    """Пересчёт времени после вырезания пауз: клип начинается с 0."""
+    def m(t):
+        acc = 0.0
+        for a, b in keep:
+            if t <= a:
+                return acc
+            if t <= b:
+                return acc + t - a
+            acc += b - a
+        return acc
+    L = sum(b - a for a, b in keep)
+    st0 = c["start"]
+    segs = []
+    for s in segments:
+        if s["e"] <= c["start"] or s["s"] >= c["end"]:
+            continue
+        ws = [{**w, "s": m(w["s"] - st0), "e": m(w["e"] - st0)} for w in s.get("words") or []]
+        ws = [w for w in ws if w["e"] > w["s"]]
+        segs.append({**s, "s": m(s["s"] - st0), "e": m(s["e"] - st0), "words": ws})
+    c2 = {**c, "orig_start": c["start"], "orig_end": c["end"], "start": 0.0, "end": L,
+          "fx_t": [m(t) for t in c.get("fx_t", [])]}
+    return segs, c2
+
+
+def _teaser(out, d, c, st, info):
+    mode = st.get("teaser", "auto")
+    if mode == "off" or not info["audio"] or c.get("labels"):
+        return out
+    if mode == "auto" and st.get("content") not in GAMES:
+        return out
+    t = max(c.get("fx_t") or [0.0], default=0.0)
+    if c.get("fx_t"):
+        t = c["fx_t"][-1] if c.get("fx_big", 0) < 6 else c["fx_t"][0]
+    if t < 4.0:  # яркий момент и так в начале
+        return out
+    try:
+        dst = d / "teaser.mp4"
+        media.teaser(out, t + 0.3, dst)
+        return dst
+    except Exception as e:
+        log.warning("teaser failed: %s", e)
+        return out
 
 
 def _game_layout(raw, c, info, st):
