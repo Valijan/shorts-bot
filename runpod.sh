@@ -41,6 +41,33 @@ WATERMARK=
 ENV
 fi
 
+# ---- Свой сервер Bot API: файлы до 2 ГБ вместо 20 МБ ----
+# Нужны TG_API_ID и TG_API_HASH (https://my.telegram.org → API development tools)
+if [ -n "${TG_API_ID:-}" ] && [ -n "${TG_API_HASH:-}" ]; then
+  BIN=/workspace/bin/telegram-bot-api
+  if [ ! -x "$BIN" ]; then
+    echo "▶ Собираю сервер Bot API (один раз, ~5–10 минут)…"
+    apt-get install -y -qq make git zlib1g-dev libssl-dev gperf cmake g++ >/dev/null
+    rm -rf /tmp/tba && git clone -q --recursive --depth 1 https://github.com/tdlib/telegram-bot-api /tmp/tba
+    mkdir -p /tmp/tba/build /workspace/bin && cd /tmp/tba/build
+    cmake -DCMAKE_BUILD_TYPE=Release .. >/dev/null && cmake --build . --target telegram-bot-api -j"$(nproc)" >/dev/null
+    cp telegram-bot-api "$BIN" && cd - >/dev/null && rm -rf /tmp/tba
+  fi
+  TOKEN="${BOT_TOKEN:-$(grep -oP '^BOT_TOKEN=\K.*' .env 2>/dev/null)}"
+  if [ ! -f /workspace/.tg_logged_out ] && [ -n "$TOKEN" ]; then
+    # один раз «выписываем» бота из облачного API, чтобы он работал через свой сервер
+    curl -s "https://api.telegram.org/bot${TOKEN}/logOut" >/dev/null && touch /workspace/.tg_logged_out
+  fi
+  mkdir -p /workspace/tba-data
+  pkill -f telegram-bot-api 2>/dev/null || true
+  nohup "$BIN" --local --api-id="$TG_API_ID" --api-hash="$TG_API_HASH" \
+    --dir=/workspace/tba-data --http-port=8081 > /workspace/tba.log 2>&1 &
+  sleep 3
+  grep -q '^BOT_API_URL=' .env 2>/dev/null && sed -i 's|^BOT_API_URL=.*|BOT_API_URL=http://127.0.0.1:8081|' .env \
+    || echo "BOT_API_URL=http://127.0.0.1:8081" >> .env
+  echo "✅ Свой Bot API запущен — бот принимает файлы до 2 ГБ"
+fi
+
 pkill -f "python3 -m app.bot" 2>/dev/null || true
 nohup python3 -m app.bot > /workspace/bot.log 2>&1 &
 sleep 5
