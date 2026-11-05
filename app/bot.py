@@ -34,17 +34,18 @@ queue: asyncio.Queue = asyncio.Queue()
 # ---------- Настройки пользователя ----------
 
 SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
-DEFAULTS = {"clips": 5, "subs": "orig", "mode": "auto", "length": "mid", "pick": "best",
+DEFAULTS = {"content": "auto", "clips": 5, "subs": "orig", "mode": "auto", "length": "mid", "pick": "best",
             "review": "off"}
 OPTIONS = {
+    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
     "pick": [("🔥 Лучшие моменты", "best"), ("📼 По порядку", "seq")],
     "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
     "subs": [("Оригинал", "orig"), ("RU", "ru"), ("UZ", "uz"), ("EN", "en"), ("Нет", "none")],
-    "mode": [("Авто", "auto"), ("Кроп по лицу", "crop"), ("С размытым фоном", "blur")],
+    "mode": [("Авто", "auto"), ("Кроп по лицу", "crop"), ("Размытый фон", "blur"), ("🎮 Игра", "game")],
     "review": [("Выкл", "off"), ("🎙 Вкл", "on")],
 }
-TITLES = {"pick": "Как резать", "clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16", "review": "Обзор: ИИ-комментарий с озвучкой"}
+TITLES = {"content": "Что за видео", "pick": "Как резать", "clips": "Сколько клипов", "length": "Длина клипа", "subs": "Субтитры", "mode": "Кадр 9:16", "review": "Обзор: ИИ-комментарий с озвучкой"}
 
 
 def load_all() -> dict:
@@ -82,6 +83,7 @@ def settings_text(uid: int) -> str:
     names = {k: dict((v, l) for l, v in OPTIONS[k]) for k in OPTIONS}
     clips = "все" if st["clips"] == 0 else st["clips"]
     return ("⚙️ <b>Настройки</b>\n"
+            f"Видео: {names['content'][st['content']]}\n"
             f"Режим: {names['pick'][st['pick']]}\n"
             f"Клипов: {clips} · Длина: {names['length'][st['length']]}\n"
             f"Субтитры: {names['subs'][st['subs']]} · Кадр: {names['mode'][st['mode']]}\n"
@@ -108,6 +110,7 @@ async def start(m: Message):
     await m.answer(
         "🎬 <b>Нарезка видео в Shorts</b>\n\n"
         "Пришли мне видеофайл или ссылку (YouTube и др.) — я найду лучшие моменты, "
+        "для игр MLBB / PUBG Mobile — килы, советы и смешные моменты, "
         "переведу в вертикальный формат 9:16, добавлю субтитры и пришлю готовые клипы.\n\n"
         "/settings — настройки (кол-во клипов, длина, субтитры, кадр)\n"
         "/id — твой Telegram ID\n\n" + settings_text(m.from_user.id)
@@ -149,8 +152,15 @@ async def on_set(c: CallbackQuery):
 
 async def enqueue(m: Message, job: dict):
     pos = queue.qsize() + (1 if getattr(worker, "busy", False) else 0)
+    over = job.get("over") or {}
+    extra = ""
+    if over:
+        names = dict((v, l) for l, v in OPTIONS["content"])
+        extra = (f"\n🎯 Для этого видео: {names.get(over.get('content'), 'как в настройках')}"
+                 + (f", клипов: {over['clips']}" if "clips" in over else ""))
     status = await m.answer(
-        "📥 Принял! " + (f"В очереди: {pos}." if pos else "Начинаю…") + "\n" + settings_text(m.from_user.id)
+        "📥 Принял! " + (f"В очереди: {pos}." if pos else "Начинаю…") + extra + "\n"
+        + settings_text(m.from_user.id)
     )
     job.update(chat_id=m.chat.id, uid=m.from_user.id, status_id=status.message_id)
     await queue.put(job)
@@ -167,9 +177,30 @@ async def on_file(m: Message):
     await enqueue(m, {"type": "file", "file_id": f.file_id})
 
 
+def parse_overrides(text: str) -> dict:
+    """«mlbb 2 https://…» → режим MLBB, 2 клипа (только для этого видео)."""
+    t = URL_RE.sub(" ", text.lower())
+    over = {}
+    if re.search(r"mlbb|млбб|mobile ?legends|мобайл ?легенд", t):
+        over["content"] = "mlbb"
+    elif re.search(r"pubg|пабг|пубг", t):
+        over["content"] = "pubg"
+    elif re.search(r"фильм|кино|movie|film|сериал", t):
+        over["content"] = "movie"
+    num = re.search(r"(?<![\d/:.])(\d{1,2})(?![\d/:.])", t)
+    if num and 1 <= int(num.group(1)) <= 20:
+        over["clips"] = int(num.group(1))
+    if re.search(r"9[/:x]16|9 16", t) and "mode" not in over:
+        pass  # вертикаль и так всегда
+    if over:
+        over["pick"] = "best"
+    return over
+
+
 @router.message(F.text.regexp(URL_RE))
 async def on_link(m: Message):
-    await enqueue(m, {"type": "url", "url": URL_RE.search(m.text).group(0)})
+    await enqueue(m, {"type": "url", "url": URL_RE.search(m.text).group(0),
+                      "over": parse_overrides(m.text)})
 
 
 @router.message(F.text)
@@ -195,6 +226,13 @@ def ytdl(url: str, outdir: Path) -> Path:
     if not files:
         raise RuntimeError("Не удалось скачать видео по ссылке")
     return files[0]
+
+
+TAGS = {
+    "mlbb": "#mlbb #mobilelegends #shorts", "pubg": "#pubgmobile #pubg #shorts",
+    "movie": "#фильм #кино #shorts", "auto": "#shorts",
+}
+TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "funny": "😂 Смешной момент"}
 
 
 def fmt(t: float) -> str:
@@ -236,14 +274,17 @@ async def worker(bot: Bot):
                     src = workdir / "source.mp4"
                     await bot.download_file(tg_file.file_path, destination=src)
 
-            st = get_settings(job["uid"])
+            st = {**get_settings(job["uid"]), **job.get("over", {})}
             if st.get("review") == "on" and not cfg.ANTHROPIC_API_KEY:
                 await bot.send_message(chat, "⚠️ Для режима «Обзор» нужен ключ Claude API "
                                              "(ANTHROPIC_API_KEY). Режу без комментариев.")
 
             async def send_clip(r):
+                kind = TYPE_ICON.get(r.get("type", ""), "") if r.get("content") in ("mlbb", "pubg") else ""
                 cap = (f"<b>{r['title'] or 'Клип ' + str(r['index'])}</b>\n"
-                       f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n\n#shorts")
+                       + (f"{kind}\n" if kind else "")
+                       + f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n\n"
+                       + TAGS.get(r.get("content", "auto"), "#shorts"))
                 if r["path"].stat().st_size > UPLOAD_LIMIT:
                     await bot.send_message(chat, f"Клип {r['index']} слишком большой для отправки.")
                     return

@@ -8,6 +8,7 @@ from . import config as cfg
 log = logging.getLogger(__name__)
 
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
+GAMES = ("mlbb", "pubg")
 
 
 def process(src: Path, workdir: Path, st: dict, progress, on_clip=None) -> list[dict]:
@@ -17,6 +18,9 @@ def process(src: Path, workdir: Path, st: dict, progress, on_clip=None) -> list[
     lmin, lmax = LENGTHS.get(st.get("length", "mid"), (30, 45))
     sub_lang = st.get("subs", "orig")
     use_llm = bool(cfg.ANTHROPIC_API_KEY)
+    content = st.get("content", "auto")
+    if content in GAMES and st.get("mode", "auto") == "auto":
+        st = {**st, "mode": "game"}  # игровой макет: весь кадр сверху + крупно герой снизу
 
     progress("🔍 Анализирую видео…")
     info = media.probe(src)
@@ -31,31 +35,47 @@ def process(src: Path, workdir: Path, st: dict, progress, on_clip=None) -> list[
     progress("🎞 Ищу смены сцен и пики звука…")
     cuts = media.detect_cuts(src)
     loud = media.loudness_per_sec(src) if info["audio"] else []
+    motion = []
+    if content != "auto" and not seq:
+        progress("⚡ Ищу экшен: движение, вспышки, килл-моменты…")
+        motion = media.motion_per_sec(src)
 
     if seq:
         clips = ai.split_sequential(dur, segments, cuts, lmin, lmax)
         if n:
             clips = clips[:n]
     else:
-        clips = _pick_best(dur, loud, cuts, segments, n or 5, lmin, lmax, sub_lang, lang, use_llm)
+        clips = _pick_best(dur, loud, cuts, segments, n or 5, lmin, lmax, sub_lang, lang, use_llm,
+                           content, motion)
     if not clips:
         raise RuntimeError("Не удалось найти подходящие фрагменты")
     return _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, use_llm,
                        progress, on_clip)
 
 
-def _pick_best(dur, loud, cuts, segments, n, lmin, lmax, sub_lang, lang, use_llm):
-    progress = lambda *_: None
+def _pick_best(dur, loud, cuts, segments, n, lmin, lmax, sub_lang, lang, use_llm,
+               content="auto", motion=()):
     title_lang = sub_lang if sub_lang in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
+    game = content in GAMES
+    events = ai.game_events(segments, content) if content != "auto" else []
+    score = ai.activity(dur, loud, motion, events) if content != "auto" else None
+    signals = ai.signals_text(score, events) if score is not None else ""
     clips = []
-    if use_llm and segments:
+    if use_llm and (segments or game):
         try:
-            clips = ai.pick_llm(segments, n, lmin, lmax, title_lang)
+            clips = ai.pick_llm(segments, n, lmin, lmax, title_lang, content, signals)
         except Exception as e:  # не падаем — уходим на алгоритм
             log.warning("LLM pick failed: %s", e)
     if not clips:
-        clips = ai.pick_heuristic(dur, loud, cuts, segments, n, lmin, lmax)
-    clips = ai.snap(clips, segments, cuts, dur, lmin, lmax)[:n]
+        if game:
+            clips = ai.pick_game(dur, score, events, n, lmin, lmax)
+        elif content == "movie":
+            clips = ai.pick_heuristic(dur, score, cuts, segments, n, lmin, lmax)
+        else:
+            clips = ai.pick_heuristic(dur, loud, cuts, segments, n, lmin, lmax)
+    if not game:  # в играх границы уже стоят по событиям
+        clips = ai.snap(clips, segments, cuts, dur, lmin, lmax)
+    clips = clips[:n]
     clips.sort(key=lambda c: c["start"])
     return clips
 
@@ -110,7 +130,8 @@ def _render_all(src, workdir, st, info, clips, segments, cuts, lang, sub_lang, u
             review.mix(out, inserts, final)
             out = final
         raw.unlink(missing_ok=True)
-        r = {"path": out, "title": c.get("title", ""), "start": c["start"],
+        r = {"path": out, "title": c.get("title", ""), "start": c["start"], "type": c.get("type", ""),
+             "content": st.get("content", "auto"),
              "end": c["end"], "mode": mode, "index": i, "total": len(clips)}
         if on_clip:
             on_clip(r)  # отправляем сразу и удаляем, чтобы не копить на диске

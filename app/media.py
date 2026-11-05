@@ -162,3 +162,28 @@ def render(clip: Path, out: Path, ass_name: str, mode: str, src_w: int, src_h: i
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)
+
+
+def motion_per_sec(path: Path) -> np.ndarray:
+    """Интенсивность действия по секундам: разница соседних кадров + вспышки (скиллы, взрывы)."""
+    fps, w, h = 4, 96, 54
+    proc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-an",
+         "-vf", f"fps={fps},scale={w}:{h},format=gray", "-f", "rawvideo", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    size, prev, per_frame = w * h, None, []
+    while True:
+        buf = proc.stdout.read(size)
+        if len(buf) < size:
+            break
+        f = np.frombuffer(buf, dtype=np.uint8).astype(np.float32)
+        if prev is not None:
+            per_frame.append(float(np.mean(np.abs(f - prev))) + 0.5 * abs(float(f.mean() - prev.mean())))
+        prev = f
+    proc.wait()
+    if not per_frame:
+        return np.zeros(1)
+    n = len(per_frame) // fps + 1
+    a = np.resize(np.array(per_frame + [0.0] * fps), n * fps)[: n * fps]
+    return a.reshape(n, fps).max(axis=1)

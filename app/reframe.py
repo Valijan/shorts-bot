@@ -128,7 +128,9 @@ def _smooth(ts, xs, crop_w, max_x):
 
 def plan(clip: Path, cuts: list[float], duration: float, src_w: int, src_h: int,
          mode: str = "auto") -> list[dict]:
-    """Возвращает сцены: [{"s","e","kind": "track"|"fit", "keys": [(t, x), ...]}]."""
+    """Возвращает сцены: [{"s","e","kind": "track"|"fit"|"game", "keys": [(t, x), ...]}]."""
+    if mode == "game" and src_w > src_h:
+        return [{"s": 0.0, "e": duration, "kind": "game", "keys": []}]
     bounds = [0.0] + sorted(c for c in cuts if 0.4 < c < duration - 0.4) + [duration]
     if mode == "blur" or src_h >= src_w:
         return [{"s": 0.0, "e": duration, "kind": "fit", "keys": []}]
@@ -225,6 +227,8 @@ def render(clip: Path, out: Path, ass_name: str, shots: list[dict], src_w: int, 
     cwd = clip.parent
     crop_w = int(src_h * 9 / 16) // 2 * 2
     ch = src_h // 2 * 2
+    if shots and shots[0].get("kind") == "game":
+        return render_game(clip, out, ass_name, src_w, src_h)
     parts, labels = [], []
     for i, sh in enumerate(shots):
         trim = f"[0:v]trim=start={sh['s']:.3f}:end={sh['e']:.3f},setpts=PTS-STARTPTS"
@@ -246,5 +250,30 @@ def render(clip: Path, out: Path, ass_name: str, shots: list[dict], src_w: int, 
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
         "-map", "[v]", "-map", "0:a:0?", "-shortest",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
+    ], cwd=cwd)
+
+
+def render_game(clip: Path, out: Path, ass_name: str, src_w: int, src_h: int):
+    """Игровой макет 9:16: сверху весь кадр (килл-фид, миникарта, тимфайт),
+    снизу крупно центр экрана — в MLBB там герой, в PUBG — прицел."""
+    cwd = clip.parent
+    top_h = int(W * src_h / src_w) // 2 * 2          # 1080x608 для 16:9
+    bot_h = H - top_h                                  # остаток экрана
+    zh = int(src_h * 0.78) // 2 * 2                    # зум ~1.3x по центру
+    zw = min(src_w, int(zh * W / bot_h)) // 2 * 2
+    zh = int(zw * bot_h / W) // 2 * 2
+    graph = (
+        f"[0:v]split=2[a][b];"
+        f"[a]scale={W}:{top_h},setsar=1[top];"
+        f"[b]crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={W}:{bot_h},setsar=1[bot];"
+        f"[top][bot]vstack=inputs=2,drawbox=y={top_h - 3}:w=iw:h=6:color=white@0.85:t=fill,"
+        f"fps=30,ass={ass_name}[v]"
+    )
+    (cwd / "graph.txt").write_text(graph)
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
+        "-map", "[v]", "-map", "0:a:0?", "-shortest",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)

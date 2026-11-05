@@ -81,34 +81,60 @@ def _json(text: str):
     return json.loads(m.group(0)) if m else None
 
 
-def pick_llm(segments, n, lmin, lmax, title_lang) -> list[dict]:
+GOAL = {
+    "auto": """Выбери до {n} лучших фрагментов для вертикальных шортсов. Требования:""",
+    "movie": """Это ФИЛЬМ или сериал. Выбери до {n} самых сильных сцен для шортсов:
+культовые фразы, кульминации, драки/погони, сюжетные повороты, смешные и трогательные моменты.
+Не бери начальные логотипы и финальные титры. Сцена должна быть законченной.
+Требования:""",
+    "mlbb": """Это геймплей Mobile Legends: Bang Bang. Ищи до {n} моментов трёх типов:
+ kill — убийства, особенно мульти-киллы (Double/Triple Kill, Maniac, Savage), Wiped Out, Shut Down,
+        выигранные тимфайты, кражи Лорда/Черепахи, камбэки;
+ tip — стример объясняет фишку: сборку, эмблемы, комбо, позиционирование, как контрить;
+ funny — смешные моменты: реакция, фейлы, шутки, троллинг, неожиданности.
+Клип начинается за 2–4 с до начала драки и заканчивается сразу после последнего килла/панчлайна.
+Требования:""",
+    "pubg": """Это геймплей PUBG Mobile. Ищи до {n} моментов трёх типов:
+ kill — убийства и нокауты, хэдшоты, сквад-вайпы, клатчи 1 против нескольких, Winner Winner Chicken Dinner;
+ tip — стример объясняет фишку: раскладка, чувствительность, отдача, ротации, лут, тактика;
+ funny — смешные моменты: реакция, фейлы, троллинг, неожиданности.
+Клип начинается за 2–4 с до перестрелки и заканчивается сразу после последнего килла/панчлайна.
+Требования:""",
+}
+
+
+def pick_llm(segments, n, lmin, lmax, title_lang, content="auto", signals="") -> list[dict]:
     lines = [f"[{s['s']:.1f}-{s['e']:.1f}] {s['t']}" for s in segments if s["t"]]
-    transcript = "\n".join(lines)
+    transcript = "\n".join(lines) or "(речи почти нет — опирайся на сигналы)"
     if len(transcript) > 400_000:  # очень длинное видео — берём равномерно
         k = len(transcript) / 400_000
         transcript = "\n".join(lines[:: int(np.ceil(k))])
+    goal = GOAL.get(content, GOAL["auto"]).format(n=n)
+    sig = f"\n\nСИГНАЛЫ (секунда: громкость/действие/события, выше = ярче):\n{signals}" if signals else ""
     prompt = f"""Ты — опытный монтажёр YouTube Shorts. Ниже расшифровка видео с таймкодами в секундах.
 
-Выбери до {n} лучших фрагментов для вертикальных шортсов. Требования:
+{goal}
 - длина каждого фрагмента от {lmin} до {lmax} секунд;
 - фрагмент понятен без контекста, начинается с сильного «крючка» (первые 2–3 секунды цепляют);
 - кульминация, эмоция, юмор, конфликт, неожиданный поворот или ценная мысль;
 - не обрывать на середине фразы: начало = начало реплики, конец = конец реплики;
 - фрагменты не пересекаются; сортируй от самого сильного к слабому.
 
-Для каждого дай цепляющий заголовок ({LANG_NAMES.get(title_lang, 'русский')} язык, до 45 символов, без кавычек и хэштегов).
+Для каждого дай цепляющий заголовок ({LANG_NAMES.get(title_lang, 'русский')} язык, до 45 символов, без кавычек и хэштегов)
+и тип: kill, tip, funny или best.
 
 Ответь ТОЛЬКО JSON без пояснений:
-{{"clips":[{{"start":12.3,"end":48.0,"title":"...","score":9}}]}}
+{{"clips":[{{"start":12.3,"end":48.0,"title":"...","type":"best","score":9}}]}}
 
 РАСШИФРОВКА:
-{transcript}"""
+{transcript}{sig}"""
     data = _json(_claude(prompt)) or {}
     clips = []
     for c in data.get("clips", []):
         try:
             clips.append({"start": float(c["start"]), "end": float(c["end"]),
-                          "title": str(c.get("title", ""))[:60], "score": float(c.get("score", 5))})
+                          "title": str(c.get("title", ""))[:60], "score": float(c.get("score", 5)),
+                          "type": str(c.get("type", "best"))})
         except (KeyError, ValueError, TypeError):
             continue
     return clips
@@ -129,6 +155,112 @@ def translate(segments, target: str) -> list[dict]:
         for j, s in enumerate(batch):
             out.append({**s, "t": str(res.get(str(j), s["t"])), "words": []})
     return out
+
+
+# ---------- Игры: события по словам ----------
+
+# (регулярка, вес, тип, подпись)
+_EV = {
+    "mlbb": [
+        (r"savage|сэвидж|севидж|сав[еэ]дж", 10, "kill", "SAVAGE!"),
+        (r"maniac|маньяк", 8, "kill", "MANIAC!"),
+        (r"wiped? ?out|вайп", 6, "kill", "WIPED OUT"),
+        (r"triple ?kill|трипл", 6, "kill", "TRIPLE KILL"),
+        (r"legendary|godlike|unstoppable|rampage|легендар", 4, "kill", "LEGENDARY"),
+        (r"double ?kill|дабл", 4, "kill", "DOUBLE KILL"),
+        (r"shut ?down|шат ?даун", 3, "kill", "SHUT DOWN"),
+        (r"first blood|перв\w* кровь", 3, "kill", "FIRST BLOOD"),
+        (r"\blord\b|лорд|turtle|черепах", 2, "kill", "Лорд"),
+        (r"victory|побед", 2, "kill", "VICTORY"),
+    ],
+    "pubg": [
+        (r"winner|chicken|чикен|топ ?1\b|топ[- ]один", 8, "kill", "CHICKEN DINNER"),
+        (r"squad ?wipe|вайп|всех убил|выкосил|клатч|clutch|\bace\b|эйс", 7, "kill", "CLUTCH"),
+        (r"head ?shot|хэд ?шот|хедшот|в голову|ван ?шот|one ?shot", 4, "kill", "HEADSHOT"),
+        (r"нокнул|кнокнул|knock|упал|минус|убил|killed|kill", 3, "kill", "KILL"),
+    ],
+}
+_COMMON = [
+    (r"ах[аx]+|ха-?ха|хах|лол|\blol\b|ору|угар|ржу|смех|laugh|хи-?хи", 4, "funny", "😂"),
+    (r"капец|жесть|офиг|бля|блин|what the|wtf|ничего себе|вау|wow|omg", 2, "funny", "😱"),
+    (r"совет|лайфхак|фишк|запомни|секрет|сборк|билд|эмблем|комбо|combo|\btip|trick|"
+     r"чувствительн|раскладк|отдач", 3, "tip", "💡"),
+]
+
+
+def game_events(segments, content: str) -> list[dict]:
+    rules = _EV.get(content, []) + _COMMON
+    out = []
+    for seg in segments:
+        items = seg.get("words") or [{"s": seg["s"], "e": seg["e"], "w": seg["t"]}]
+        text_hits = set()
+        for w in items:
+            low = w["w"].lower()
+            for rx, wt, kind, label in rules:
+                if label not in text_hits and re.search(rx, low):
+                    text_hits.add(label)
+                    out.append({"t": float(w["s"]), "w": wt, "kind": kind, "label": label})
+        low = seg["t"].lower()  # фразы из нескольких слов («double kill»)
+        for rx, wt, kind, label in rules:
+            if label not in text_hits and re.search(rx, low):
+                out.append({"t": float(seg["s"]), "w": wt, "kind": kind, "label": label})
+    return out
+
+
+def _z(a, n):
+    a = np.resize(np.asarray(a, dtype=float), n) if len(a) else np.zeros(n)
+    return np.clip((a - np.median(a)) / (np.std(a) + 1e-6), -2, 4)
+
+
+def activity(duration, loud, motion, events) -> np.ndarray:
+    """Яркость каждой секунды: громкость + действие на экране + события."""
+    n = int(duration) + 1
+    sc = 0.9 * _z(loud, n) + 0.7 * _z(motion, n)
+    k = np.exp(-0.5 * (np.arange(-6, 7) / 2.5) ** 2)
+    ev = np.zeros(n)
+    for e in events:
+        i = min(int(e["t"]), n - 1)
+        ev[i] += e["w"]
+    sc += np.convolve(ev, k, mode="same") / 2
+    return sc
+
+
+def signals_text(score, events, limit=60) -> str:
+    """Краткая сводка для ИИ: самые яркие секунды и найденные события."""
+    top = sorted(np.argsort(score)[-limit:])
+    lines = [f"{t}s: {score[t]:.1f}" for t in top]
+    lines += [f"{e['t']:.0f}s: событие {e['label']} ({e['kind']})" for e in events[:150]]
+    return "\n".join(lines)
+
+
+def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
+    """Без ИИ: окна вокруг пиков, конец — после последнего события серии."""
+    L = int(min(lmax, max(lmin, (lmin + lmax) / 2)))
+    if duration <= L + 1:
+        return [{"start": 0.0, "end": duration, "title": "", "score": 5, "type": "kill"}]
+    sm = np.convolve(score, np.ones(5) / 5, mode="same")
+    order = np.argsort(sm)[::-1]
+    picked = []
+    for peak in order:
+        peak = int(peak)
+        if any(p["start"] - 3 <= peak <= p["end"] + 3 for p in picked):
+            continue
+        s = max(0, peak - int(L * 0.45))
+        e = min(duration, s + L)
+        # продлеваем, если серия событий идёт дальше (мульти-килл, тимфайт)
+        near = [x for x in events if e - 2 <= x["t"] <= s + lmax - 2]
+        if near:
+            e = min(duration, s + lmax, max(x["t"] for x in near) + 3)
+        if any(not (e <= p["start"] or s >= p["end"]) for p in picked):
+            continue
+        inside = [x for x in events if s <= x["t"] <= e]
+        best = max(inside, key=lambda x: (x["w"], x["kind"] == "kill")) if inside else None
+        picked.append({"start": float(s), "end": float(e),
+                       "title": best["label"] if best and best["kind"] == "kill" else "",
+                       "score": float(sm[peak]), "type": best["kind"] if best else "kill"})
+        if len(picked) >= n:
+            break
+    return picked
 
 
 # ---------- Алгоритм без ИИ ----------
