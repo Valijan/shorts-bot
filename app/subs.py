@@ -16,8 +16,17 @@ def _esc(text: str) -> str:
     return text.replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
-def _header() -> str:
+COLORS = {"yellow": "&H00E5FF&", "green": "&H66FF33&", "cyan": "&HFFE500&", "pink": "&HB04DFF&"}
+SIZES = {"s": 68, "m": 84, "l": 102}
+# позиция: (выравнивание ASS, отступ по вертикали)
+POS = {"bottom": (2, 560), "center": (5, 0), "top": (8, 430)}
+
+
+def _header(style=None) -> str:
+    st = style or {}
     f = cfg.SUB_FONT
+    size = SIZES.get(st.get("size", "m"), 84)
+    al, mv = POS.get(st.get("pos", "bottom"), (2, 560))
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -27,7 +36,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Sub,{f},84,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,2,70,70,560,1
+Style: Sub,{f},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,{al},70,70,{mv},1
 Style: Title,{f},66,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,8,80,80,230,1
 Style: Mark,{f},40,&H60FFFFFF,&H000000FF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,60,60,90,1
 
@@ -71,7 +80,11 @@ def _words_from_segments(segments, max_words=3):
 
 
 def build_ass(path, segments, start: float, end: float, title: str = "",
-              word_level: bool = True, upper: bool = True, overlay=None, mute=None):
+              word_level: bool = True, upper: bool = True, overlay=None, mute=None,
+              style=None, labels=None):
+    """style: {color,size,pos,title(bool),mark}; labels: [(s,e,text)] — надписи-заголовки по времени."""
+    st = style or {}
+    hl = r"{\c" + COLORS.get(st.get("color", "yellow"), COLORS["yellow"]) + "}"
     """segments — сегменты с абсолютным временем; start/end — границы клипа."""
     dur = end - start
     if word_level:
@@ -87,10 +100,14 @@ def build_ass(path, segments, start: float, end: float, title: str = "",
     if overlay:
         words = sorted(words + [dict(w, voice=True) for w in overlay], key=lambda w: w["s"])
     lines = []
-    if cfg.SHOW_TITLE and title:
+    show_title = st.get("title", cfg.SHOW_TITLE)
+    if show_title and title and not labels:
         lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Title,,0,0,0,,{_esc(title)}")
-    if cfg.WATERMARK:
-        lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Mark,,0,0,0,,{_esc(cfg.WATERMARK)}")
+    for a, b, text in labels or []:
+        lines.append(f"Dialogue: 1,{_ts(a)},{_ts(b)},Title,,0,0,0,,{_esc(text)}")
+    mark = st.get("mark") or cfg.WATERMARK
+    if mark:
+        lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Mark,,0,0,0,,{_esc(mark)}")
 
     chunks = _chunks_from_words(words)
     for ci, ch in enumerate(chunks):
@@ -101,6 +118,6 @@ def build_ass(path, segments, start: float, end: float, title: str = "",
             w_end = ch[wi + 1]["s"] if wi + 1 < len(ch) else ch_end
             if w_end <= w["s"]:
                 continue
-            parts = [f"{HL}{t}{RESET}" if i == wi else t for i, t in enumerate(texts)]
+            parts = [f"{hl}{t}{RESET}" if i == wi else t for i, t in enumerate(texts)]
             lines.append(f"Dialogue: 0,{_ts(w['s'])},{_ts(w_end)},Sub,,0,0,0,,{' '.join(parts)}")
-    path.write_text(_header() + "\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(_header(st) + "\n".join(lines) + "\n", encoding="utf-8")

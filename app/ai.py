@@ -351,3 +351,43 @@ def split_sequential(duration, segments, cuts, lmin, lmax) -> list[dict]:
         out.append({"start": t, "end": e, "title": f"Часть {i}", "score": 0})
         t, i = e, i + 1
     return out
+
+
+# ---------- Текст для публикации ----------
+
+_BASE_TAGS = {
+    "mlbb": "#mlbb #mobilelegends #mobilelegendsbangbang #mlbbshorts #shorts",
+    "pubg": "#pubgmobile #pubg #pubgm #pubgshorts #shorts",
+    "movie": "#фильм #кино #моменты #shorts",
+    "auto": "#shorts #viral",
+}
+_TYPE_WORD = {"kill": "килл-момент", "tip": "полезный совет", "funny": "смешной момент"}
+
+
+def publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
+    """Название, описание и хэштеги для YouTube Shorts / TikTok / Reels."""
+    tags = _BASE_TAGS.get(content, _BASE_TAGS["auto"])
+    fallback_title = clip.get("title") or {"mlbb": "Этот момент в MLBB 🔥", "pubg": "Жёсткий момент в PUBG Mobile",
+                                           "movie": "Лучший момент фильма"}.get(content, "Смотри до конца 👀")
+    base = {"title": fallback_title[:90],
+            "desc": f"{_TYPE_WORD.get(clip.get('type'), 'лучший момент').capitalize()}. "
+                    f"Подписывайся, чтобы не пропустить новые! 🔔",
+            "tags": tags}
+    if not cfg.ANTHROPIC_API_KEY:
+        return base
+    said = " ".join(s["t"] for s in segments
+                    if s["e"] > clip["start"] and s["s"] < clip["end"])[:1500]
+    prompt = f"""Ты SMM-специалист. Напиши текст для публикации короткого вертикального видео
+(YouTube Shorts, TikTok, Reels). Тематика: {content}. Тип момента: {clip.get('type', '')}.
+Рабочий заголовок: {clip.get('title', '')}. Что звучит в ролике: {said or '(почти без речи)'}
+Язык: {LANG_NAMES.get(lang, 'русский')}.
+Ответь ТОЛЬКО JSON: {{"title":"до 70 символов, цепляет, 1 эмодзи","desc":"1–2 предложения + призыв подписаться",
+"tags":"8–12 хэштегов через пробел, популярные и нишевые, обязательно #shorts"}}"""
+    try:
+        data = _json(_claude(prompt, 600)) or {}
+        return {"title": str(data.get("title") or base["title"])[:100],
+                "desc": str(data.get("desc") or base["desc"])[:500],
+                "tags": str(data.get("tags") or tags)[:300]}
+    except Exception as e:
+        log.warning("publish_text failed: %s", e)
+        return base
