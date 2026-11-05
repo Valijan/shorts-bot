@@ -173,8 +173,10 @@ async def on_file(m: Message):
         return await m.answer("Это не видео 🙂 Пришли видеофайл или ссылку.")
     if f.file_size and f.file_size > DOWNLOAD_LIMIT:
         mb = DOWNLOAD_LIMIT // 1024 // 1024
-        return await m.answer(f"Файл больше {mb} МБ. Пришли ссылку или файл поменьше.")
-    await enqueue(m, {"type": "file", "file_id": f.file_id})
+        return await m.answer(f"Файл больше {mb} МБ — Telegram не даст боту его скачать. "
+                              "Скачай видео в 480p/720p или обрежь до нужного куска и пришли снова.")
+    await enqueue(m, {"type": "file", "file_id": f.file_id,
+                      "over": parse_overrides(m.caption or "")})
 
 
 def parse_overrides(text: str) -> dict:
