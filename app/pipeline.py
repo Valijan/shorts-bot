@@ -387,7 +387,7 @@ def _finish(out, d, c, st, info, progress, i, total):
 
 # ---------- Топ-5 ----------
 
-def compile_top(src: Path, workdir: Path, st: dict, A: dict, progress, k=5, piece=(7, 11)):
+def compile_top(src: Path, workdir: Path, st: dict, A: dict, progress, k=5, piece=(6, 22)):
     """Один шортс из k лучших моментов: #5 … #1 (лучший в конце)."""
     parts = choose(A, {**st, "ranges": None, "pick": "best"}, k, lengths=piece)
     if not parts:

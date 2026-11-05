@@ -204,10 +204,15 @@ _COMMON = [
 ]
 
 
+ANNOUNCER_EN = re.compile(r"savage|maniac|triple|double|wiped|shut ?down|first blood|legendary|godlike|"
+                          r"unstoppable|rampage|winner|chicken", re.I)
+
+
 def game_events(segments, content: str) -> list[dict]:
     rules = _EV.get(content, []) + _COMMON
     out = []
     for seg in segments:
+        n_words = len(seg["t"].split())
         items = seg.get("words") or [{"s": seg["s"], "e": seg["e"], "w": seg["t"]}]
         text_hits = set()
         for w in items:
@@ -215,11 +220,18 @@ def game_events(segments, content: str) -> list[dict]:
             for rx, wt, kind, label in rules:
                 if label not in text_hits and re.search(rx, low):
                     text_hits.add(label)
-                    out.append({"t": float(w["s"]), "w": wt, "kind": kind, "label": label})
+                    # диктор игры говорит коротко и по-английски; русское слово в длинной фразе —
+                    # это стример обсуждает («маньяка не дали»), а не сам момент
+                    if kind == "kill" and (n_words > 4 or not ANNOUNCER_EN.search(low)):
+                        out.append({"t": float(w["s"]), "w": wt * 0.3, "kind": "talk", "label": label})
+                    else:
+                        out.append({"t": float(w["s"]), "w": wt, "kind": kind, "label": label})
         low = seg["t"].lower()  # фразы из нескольких слов («double kill»)
         for rx, wt, kind, label in rules:
             if label not in text_hits and re.search(rx, low):
-                out.append({"t": float(seg["s"]), "w": wt, "kind": kind, "label": label})
+                strong = kind != "kill" or (n_words <= 4 and ANNOUNCER_EN.search(low))
+                out.append({"t": float(seg["s"]), "w": wt if strong else wt * 0.3,
+                            "kind": kind if strong else "talk", "label": label})
     return out
 
 
@@ -249,27 +261,58 @@ def signals_text(score, events, limit=60) -> str:
     return "\n".join(lines)
 
 
+MULTI = {"DOUBLE KILL": 2, "TRIPLE KILL": 3, "MANIAC!": 4, "SAVAGE!": 5, "WIPED OUT": 5,
+         "LEGENDARY": 3, "CLUTCH": 4, "CHICKEN DINNER": 3}
+LOOKBACK = {1: 4, 2: 7, 3: 10, 4: 14, 5: 18}  # сколько секунд обычно длится серия из N килов
+
+
+def chain_span(events, ev):
+    """Начало и конец всей серии килов, которая закончилась событием ev."""
+    n = MULTI.get(ev["label"], 1)
+    start = ev["t"] - LOOKBACK.get(n, 4)
+    kills = sorted((e["t"] for e in events if e["kind"] == "kill" and e["t"] < ev["t"] - 0.3), reverse=True)
+    first = ev["t"]
+    for t in kills:  # предыдущие килы этой же серии (паузы < 12 с)
+        if first - t < 12:
+            first = t
+        else:
+            break
+    return max(0.0, min(start, first - 2.5)), ev["t"] + 2.5
+
+
 def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
-    """Без ИИ: окна вокруг пиков, конец — после последнего события серии."""
+    """Без ИИ: сначала серии килов целиком (от первого до последнего), потом пики экшена."""
     L = int(min(lmax, max(lmin, (lmin + lmax) / 2)))
     if duration <= L + 1:
         return [{"start": 0.0, "end": duration, "title": "", "score": 5, "type": "kill"}]
-    sm = np.convolve(score, np.ones(5) / 5, mode="same")
-    order = np.argsort(sm)[::-1]
     picked = []
-    for peak in order:
+
+    def free(a, b):
+        return all(b <= p["start"] or a >= p["end"] for p in picked)
+
+    kills = sorted((e for e in events if e["kind"] == "kill"), key=lambda e: -e["w"])
+    for ev in kills:
+        a, b = chain_span(events, ev)
+        if b - a < lmin:  # короткая — добираем контекст до минимума
+            pad = (lmin - (b - a)) / 2
+            a, b = a - pad, b + pad
+        if b - a > lmax:  # слишком длинная — держим финал серии
+            a = b - lmax
+        a, b = max(0.0, a), min(duration, b)
+        if b - a >= min(lmin, 5) and free(a, b):
+            picked.append({"start": float(a), "end": float(b), "title": ev["label"],
+                           "score": float(ev["w"]) + 10, "type": "kill"})
+        if len(picked) >= n:
+            return picked
+
+    sm = np.convolve(score, np.ones(5) / 5, mode="same")
+    for peak in np.argsort(sm)[::-1]:
         peak = int(peak)
-        if any(p["start"] - 3 <= peak <= p["end"] + 3 for p in picked):
-            continue
         s = max(0, peak - int(L * 0.45))
         e = min(duration, s + L)
-        # продлеваем, если серия событий идёт дальше (мульти-килл, тимфайт)
-        near = [x for x in events if e - 2 <= x["t"] <= s + lmax - 2]
-        if near:
-            e = min(duration, s + lmax, max(x["t"] for x in near) + 3)
-        if any(not (e <= p["start"] or s >= p["end"]) for p in picked):
+        if not free(s, e):
             continue
-        inside = [x for x in events if s <= x["t"] <= e]
+        inside = [x for x in events if s <= x["t"] <= e and x["kind"] != "talk"]
         best = max(inside, key=lambda x: (x["w"], x["kind"] == "kill")) if inside else None
         picked.append({"start": float(s), "end": float(e),
                        "title": best["label"] if best and best["kind"] == "kill" else "",
