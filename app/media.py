@@ -215,3 +215,15 @@ def teaser(src: Path, at: float, dst: Path, length: float = 1.5):
         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
     ])
+
+
+def progress_bar(src: Path, dst: Path, duration: float, color: str = "0xFFD400"):
+    """Тонкая полоска внизу, заполняется к концу ролика."""
+    d = max(duration, 0.1)
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(src),
+        "-filter_complex", f"color=c={color}:s={W}x14:r=30[c];"
+                           f"[0:v][c]overlay=x='-W+W*t/{d:.3f}':y=H-14:shortest=1[v]",
+        "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(dst),
+    ])

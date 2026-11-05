@@ -43,7 +43,7 @@ SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
 DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "mid", "confirm": "off",
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
             "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
-            "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto"}
+            "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto", "pbar": "auto"}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
@@ -66,6 +66,7 @@ OPTIONS = {
     "pubtext": [("📋 Вкл", "on"), ("Выкл", "off")],
     "jumpcut": [("Авто", "auto"), ("✂️ Всегда", "on"), ("Выкл", "off")],
     "teaser": [("Авто (игры)", "auto"), ("🎯 Всегда", "on"), ("Выкл", "off")],
+    "pbar": [("Авто (игры)", "auto"), ("▬ Всегда", "on"), ("Выкл", "off")],
     "autostop": [("Выкл", 0), ("15 мин", 15), ("30 мин", 30), ("60 мин", 60)],
 }
 TITLES = {"content": "Что за видео", "pick": "Как резать", "clips": "Сколько клипов",
@@ -76,11 +77,12 @@ TITLES = {"content": "Что за видео", "pick": "Как резать", "c
           "music": "Фоновая музыка (/music)", "review": "Обзор: ИИ-комментарий с озвучкой",
           "pubtext": "Текст для публикации",
           "jumpcut": "Убирать паузы в речи", "teaser": "Тизер: яркий момент в начале",
+          "pbar": "Полоска прогресса внизу",
           "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
     "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm"]),
     "look": ("🎨 Оформление", ["mode", "director", "title", "subs", "sub_words", "sub_color", "sub_size", "sub_pos"]),
-    "fx": ("✨ Эффекты и звук", ["fx", "jumpcut", "teaser", "music", "review", "pubtext"]),
+    "fx": ("✨ Эффекты и звук", ["fx", "jumpcut", "teaser", "pbar", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
 }
 GLOBAL_KEYS = {"autostop"}

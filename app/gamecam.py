@@ -221,7 +221,20 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
         sel = [(t - a, x * src_w) for t, x in zip(ts, xs) if a <= t < b] or [(0.0, src_w / 2)]
         keys = _smooth([p[0] for p in sel], [p[1] for p in sel], crop_w, max_x)
         shots.append({"s": a, "e": b, "kind": "track", "keys": keys})
-    layout = {"layout": "stream" if cam else "follow", "shots": shots, "crop_w": crop_w,
+    react = []
+    if cam:  # всплески громкости = реакция стримера → зум камеры
+        from .media import loudness_per_sec
+        try:
+            ld = loudness_per_sec(clip)
+            z = (ld - np.median(ld)) / (np.std(ld) + 1e-6)
+            for t in np.argsort(z)[::-1]:
+                if z[t] < 1.6 or len(react) >= 4:
+                    break
+                if all(abs(t - r) > 3 for r in react):
+                    react.append(float(t) + 0.4)
+        except Exception:
+            pass
+    layout = {"layout": "stream" if cam else "follow", "shots": shots, "crop_w": crop_w, "react": sorted(react),
               "crop_h": crop_h, "out_h": out_h, "ai": bool(ai), "bar_h": bar_h,
               "cam_h": CAM_H if cam else 0}
     if cam:
@@ -256,12 +269,17 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
     if lay["layout"] == "stream":
         x, y, w, h = lay["cam"]
         bh = lay.get("bar_h", 0)
+        zoom = ""
+        if lay.get("react"):
+            zb = "+".join(f"exp(-pow((t-{t:.2f})/0.35,2))" for t in lay["react"])
+            zoom = (f"scale=w='trunc({W}*(1+0.18*({zb}))/2)*2':h='trunc({CAM_H}*(1+0.18*({zb}))/2)*2':"
+                    f"eval=frame,crop={W}:{CAM_H},")
         if bh:
-            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,fps=30,"
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,{zoom}fps=30,"
                       f"pad={W}:{CAM_H + bh}:0:0:black[cam];"
                       f"[cam][game]vstack=inputs=2,ass={ass_name}[v]")
         else:
-            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,fps=30[cam];"
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,{zoom}fps=30[cam];"
                       f"[cam][game]vstack=inputs=2,"
                       f"drawbox=y={CAM_H - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
     else:

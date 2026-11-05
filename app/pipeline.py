@@ -195,6 +195,13 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
             out = mixed
         out = _finish(out, d, c, st, info, progress, i, len(clips))
         out = _teaser(out, d, c, st, info)
+        if st.get("pbar", "auto") == "on" or (st.get("pbar", "auto") == "auto" and st.get("content") in GAMES):
+            try:
+                pb = d / "pbar.mp4"
+                media.progress_bar(out, pb, media.probe(out)["duration"])
+                out = pb
+            except Exception as e:
+                log.warning("progress bar failed: %s", e)
         final = d / f"short_{i}.mp4"
         out.replace(final)
         raw.unlink(missing_ok=True)
