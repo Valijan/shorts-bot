@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ai, fx, media, reframe, review, subs
+from . import ai, fx, gamecam, media, reframe, review, subs
 from . import config as cfg
 
 log = logging.getLogger(__name__)
@@ -164,7 +164,7 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
                        overlay=review.overlay_words(inserts), mute=review.windows(inserts),
                        style=style_of(st), labels=c.get("labels"))
         local_cuts = c.get("cuts") or [x - c["start"] for x in cuts if c["start"] < x < c["end"]]
-        out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st)
+        out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st, c.get("fx_t", []))
         if inserts:
             mixed = d / "mixed.mp4"
             review.mix(out, inserts, mixed)
@@ -183,8 +183,17 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
     return results
 
 
-def _frame(raw, d, local_cuts, dur, info, st):
+def _frame(raw, d, local_cuts, dur, info, st, events=()):
     out = d / "framed.mp4"
+    if st.get("mode") == "game" and info["w"] > info["h"]:
+        try:
+            lay = gamecam.plan(raw, dur, info["w"], info["h"], st.get("content", "mlbb"),
+                               use_ai=st.get("director", "on") == "on", events=events)
+            log.info("gamecam: %s, ai=%s, shots=%d", lay["layout"], lay["ai"], len(lay["shots"]))
+            gamecam.render(raw, out, "subs.ass", lay, info["w"], info["h"])
+            return out
+        except Exception as e:
+            log.warning("gamecam failed: %s", e)
     try:
         shots = reframe.plan(raw, local_cuts, dur, info["w"], info["h"], st.get("mode", "auto"))
         reframe.render(raw, out, "subs.ass", shots, info["w"], info["h"])

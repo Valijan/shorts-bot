@@ -129,7 +129,7 @@ def _smooth(ts, xs, crop_w, max_x):
 def plan(clip: Path, cuts: list[float], duration: float, src_w: int, src_h: int,
          mode: str = "auto") -> list[dict]:
     """Возвращает сцены: [{"s","e","kind": "track"|"fit"|"game", "keys": [(t, x), ...]}]."""
-    if mode == "game" and src_w > src_h:
+    if mode == "split" and src_w > src_h:
         return [{"s": 0.0, "e": duration, "kind": "game", "keys": []}]
     bounds = [0.0] + sorted(c for c in cuts if 0.4 < c < duration - 0.4) + [duration]
     if mode == "blur" or src_h >= src_w:

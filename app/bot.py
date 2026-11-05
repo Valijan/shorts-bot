@@ -43,7 +43,7 @@ SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
 DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "mid", "confirm": "off",
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
             "sub_pos": "bottom", "title": "on", "fx": "auto", "music": "off", "review": "off",
-            "pubtext": "on", "mark": ""}
+            "pubtext": "on", "mark": "", "director": "on"}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
@@ -52,7 +52,9 @@ OPTIONS = {
     "length": [("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
     "confirm": [("Сразу монтаж", "off"), ("👀 Сначала выбор", "on")],
     "subs": [("Оригинал", "orig"), ("RU", "ru"), ("UZ", "uz"), ("EN", "en"), ("Нет", "none")],
-    "mode": [("Авто", "auto"), ("Лицо", "crop"), ("Размытый фон", "blur"), ("🎮 Игра", "game")],
+    "mode": [("Авто", "auto"), ("Лицо", "crop"), ("Размытый фон", "blur"), ("🎮 Игра", "game"),
+             ("Сплит", "split")],
+    "director": [("🤖 ИИ-монтажник", "on"), ("Только алгоритм", "off")],
     "sub_color": [("🟡", "yellow"), ("🟢", "green"), ("🔵", "cyan"), ("🩷", "pink")],
     "sub_size": [("S", "s"), ("M", "m"), ("L", "l")],
     "sub_pos": [("Низ", "bottom"), ("Центр", "center"), ("Верх", "top")],
@@ -68,10 +70,11 @@ TITLES = {"content": "Что за видео", "pick": "Как резать", "c
           "mode": "Кадр 9:16", "sub_color": "Цвет слова", "sub_size": "Размер субтитров",
           "sub_pos": "Где субтитры", "title": "Заголовок сверху", "fx": "Эффекты на килах",
           "music": "Фоновая музыка (/music)", "review": "Обзор: ИИ-комментарий с озвучкой",
-          "pubtext": "Текст для публикации", "autostop": "Автостоп pod'а без дела"}
+          "pubtext": "Текст для публикации",
+          "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
     "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm"]),
-    "look": ("🎨 Оформление", ["subs", "sub_color", "sub_size", "sub_pos", "title", "mode"]),
+    "look": ("🎨 Оформление", ["mode", "director", "subs", "sub_color", "sub_size", "sub_pos", "title"]),
     "fx": ("✨ Эффекты и звук", ["fx", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
 }
