@@ -42,7 +42,7 @@ SESSIONS: dict[str, dict] = {}
 SETTINGS_FILE = cfg.DATA_DIR / "settings.json"
 DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "mid", "confirm": "off",
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
-            "sub_pos": "bottom", "title": "on", "fx": "auto", "music": "off", "review": "off",
+            "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
             "pubtext": "on", "mark": "", "director": "on"}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
@@ -58,7 +58,8 @@ OPTIONS = {
     "sub_color": [("🟡", "yellow"), ("🟢", "green"), ("🔵", "cyan"), ("🩷", "pink")],
     "sub_size": [("S", "s"), ("M", "m"), ("L", "l")],
     "sub_pos": [("Низ", "bottom"), ("Центр", "center"), ("Верх", "top")],
-    "title": [("Заголовок вкл", "on"), ("Выкл", "off")],
+    "title": [("🪝 Крючок 4с", "hook"), ("Весь клип", "on"), ("Выкл", "off")],
+    "sub_words": [("Авто", "auto"), ("1 слово", "1"), ("2–3 слова", "3")],
     "fx": [("Авто (игры)", "auto"), ("💥 Всегда", "on"), ("Выкл", "off")],
     "music": [("Без музыки", "off"), ("🎵 С музыкой", "on")],
     "review": [("Выкл", "off"), ("🎙 Вкл", "on")],
@@ -68,13 +69,14 @@ OPTIONS = {
 TITLES = {"content": "Что за видео", "pick": "Как резать", "clips": "Сколько клипов",
           "length": "Длина клипа", "confirm": "Перед монтажом", "subs": "Субтитры",
           "mode": "Кадр 9:16", "sub_color": "Цвет слова", "sub_size": "Размер субтитров",
-          "sub_pos": "Где субтитры", "title": "Заголовок сверху", "fx": "Эффекты на килах",
+          "sub_pos": "Где субтитры", "title": "Заголовок",
+          "sub_words": "Слов в субтитре", "fx": "Эффекты на килах",
           "music": "Фоновая музыка (/music)", "review": "Обзор: ИИ-комментарий с озвучкой",
           "pubtext": "Текст для публикации",
           "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
     "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm"]),
-    "look": ("🎨 Оформление", ["mode", "director", "subs", "sub_color", "sub_size", "sub_pos", "title"]),
+    "look": ("🎨 Оформление", ["mode", "director", "title", "subs", "sub_words", "sub_color", "sub_size", "sub_pos"]),
     "fx": ("✨ Эффекты и звук", ["fx", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
 }
@@ -583,6 +585,7 @@ TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "fu
 
 def caption_for(r: dict, st: dict, segments, lang) -> str:
     kind = TYPE_ICON.get(r.get("type", ""), "") if r.get("content") in pipeline.GAMES else ""
+    r = {**r, "title": (r.get("title") or "").replace("*", "")}
     head = (f"<b>{html.escape(r['title'] or 'Клип ' + str(r['index']))}</b>\n"
             + (f"{kind}\n" if kind else "")
             + (f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n" if not r.get("text") else ""))
@@ -736,12 +739,12 @@ async def _send_previews(bot, chat, src, clips):
     media = []
     for i, (c, p) in enumerate(zip(clips, frames)):
         if p.exists():
-            cap = f"{i + 1}. {fmt(c['start'])}–{fmt(c['end'])} {html.escape(c.get('title') or '')}"
+            cap = f"{i + 1}. {fmt(c['start'])}–{fmt(c['end'])} {html.escape((c.get('title') or '').replace('*', ''))}"
             media.append(InputMediaPhoto(media=FSInputFile(p), caption=cap))
     if media:
         await bot.send_media_group(chat, media)
     if len(clips) > 10:
-        rest = "\n".join(f"{i + 1}. {fmt(c['start'])}–{fmt(c['end'])} {html.escape(c.get('title') or '')}"
+        rest = "\n".join(f"{i + 1}. {fmt(c['start'])}–{fmt(c['end'])} {html.escape((c.get('title') or '').replace('*', ''))}"
                          for i, c in enumerate(clips[10:], 10))
         await bot.send_message(chat, rest)
 

@@ -25,10 +25,21 @@ def _use_llm():
     return bool(cfg.ANTHROPIC_API_KEY)
 
 
-def style_of(st: dict) -> dict:
-    return {"color": st.get("sub_color", "yellow"), "size": st.get("sub_size", "m"),
-            "pos": st.get("sub_pos", "bottom"), "title": st.get("title", "on") == "on",
-            "mark": st.get("mark", "")}
+def style_of(st: dict, lay: dict | None = None) -> dict:
+    words = st.get("sub_words", "auto")
+    one = words == "1" or (words == "auto" and st.get("content") in GAMES)
+    t = st.get("title", "hook")
+    style = {"color": st.get("sub_color", "yellow"), "size": st.get("sub_size", "m"),
+             "pos": st.get("sub_pos", "bottom"), "title": t if t in ("on", "off", "hook") else "hook",
+             "mark": st.get("mark", ""), "words": 1 if one else 3}
+    if lay and lay.get("layout") == "stream":   # камера сверху, полоса с ником, геймплей
+        top = lay["cam_h"] + lay["bar_h"]
+        style.update(banner_y=lay["cam_h"], sub_y=1520)
+        if lay["bar_h"]:
+            style["bar_y"] = lay["cam_h"]
+    elif lay:                                   # камера во весь экран
+        style.update(banner_y=300, sub_y=1420)
+    return style
 
 
 # ---------- 1. Анализ ----------
@@ -160,11 +171,12 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
                 inserts = review.prepare(segments, c["start"], c["end"], vlang, d)
             except Exception as e:
                 log.warning("review failed: %s", e)
+        lay = _game_layout(raw, c, info, st)
         subs.build_ass(d / "subs.ass", seg_in, c["start"], c["end"], c.get("title", ""), word_level,
                        overlay=review.overlay_words(inserts), mute=review.windows(inserts),
-                       style=style_of(st), labels=c.get("labels"))
+                       style=style_of(st, lay), labels=c.get("labels"))
         local_cuts = c.get("cuts") or [x - c["start"] for x in cuts if c["start"] < x < c["end"]]
-        out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st, c.get("fx_t", []))
+        out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st, lay)
         if inserts:
             mixed = d / "mixed.mp4"
             review.mix(out, inserts, mixed)
@@ -183,13 +195,24 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
     return results
 
 
-def _frame(raw, d, local_cuts, dur, info, st, events=()):
+def _game_layout(raw, c, info, st):
+    if st.get("mode") != "game" or info["w"] <= info["h"]:
+        return None
+    try:
+        lay = gamecam.plan(raw, c["end"] - c["start"], info["w"], info["h"], st.get("content", "mlbb"),
+                           use_ai=st.get("director", "on") == "on", events=c.get("fx_t", []),
+                           bar=bool(st.get("mark")))
+        log.info("gamecam: %s, ai=%s, shots=%d", lay["layout"], lay["ai"], len(lay["shots"]))
+        return lay
+    except Exception as e:
+        log.warning("gamecam plan failed: %s", e)
+        return None
+
+
+def _frame(raw, d, local_cuts, dur, info, st, lay=None):
     out = d / "framed.mp4"
-    if st.get("mode") == "game" and info["w"] > info["h"]:
+    if lay:
         try:
-            lay = gamecam.plan(raw, dur, info["w"], info["h"], st.get("content", "mlbb"),
-                               use_ai=st.get("director", "on") == "on", events=events)
-            log.info("gamecam: %s, ai=%s, shots=%d", lay["layout"], lay["ai"], len(lay["shots"]))
             gamecam.render(raw, out, "subs.ass", lay, info["w"], info["h"])
             return out
         except Exception as e:

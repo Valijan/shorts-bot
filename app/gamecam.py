@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 FPS = 4
 AW = 480
 CENTER_BIAS = {"mlbb": 0.3, "pubg": 0.5}   # герой / прицел обычно в центре экрана
-CAM_H = 640                                 # высота блока веб-камеры в раскладке stream
+CAM_H = 540                                 # высота блока веб-камеры в раскладке stream
+BAR_H = 100                                 # полоса с ником под камерой
 
 
 def _frames(clip: Path):
@@ -142,7 +143,7 @@ def _director(clip: Path, duration: float, content: str):
 
 
 def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "mlbb",
-         use_ai: bool = True, events=()) -> dict:
+         use_ai: bool = True, events=(), bar: bool = False) -> dict:
     """events — моменты килов внутри клипа (с): серия килов = тимфайт = широкий план."""
     samples, aw, ah = analyze(clip)
     cam = find_facecam(samples, aw, ah)
@@ -180,8 +181,9 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
         wide = list(np.interp(tt, at, aw_) > 0.5)
 
     # раскладка
+    bar_h = BAR_H if (cam and bar) else 0
     if cam:
-        out_h = H - CAM_H
+        out_h = H - CAM_H - bar_h
         crop_h = src_h // 2 * 2
         crop_w = min(src_w, int(crop_h * W / out_h)) // 2 * 2
     else:
@@ -220,7 +222,8 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
         keys = _smooth([p[0] for p in sel], [p[1] for p in sel], crop_w, max_x)
         shots.append({"s": a, "e": b, "kind": "track", "keys": keys})
     layout = {"layout": "stream" if cam else "follow", "shots": shots, "crop_w": crop_w,
-              "crop_h": crop_h, "out_h": out_h, "ai": bool(ai)}
+              "crop_h": crop_h, "out_h": out_h, "ai": bool(ai), "bar_h": bar_h,
+              "cam_h": CAM_H if cam else 0}
     if cam:
         x, y, w, h = cam
         layout["cam"] = (int(x * src_w) // 2 * 2, int(y * src_h) // 2 * 2,
@@ -252,9 +255,15 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
     graph = ";\n".join(parts) + f";\n{''.join(labels)}concat=n={len(labels)}:v=1:a=0,fps=30[game]"
     if lay["layout"] == "stream":
         x, y, w, h = lay["cam"]
-        graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,fps=30[cam];"
-                  f"[cam][game]vstack=inputs=2,"
-                  f"drawbox=y={CAM_H - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
+        bh = lay.get("bar_h", 0)
+        if bh:
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,fps=30,"
+                      f"pad={W}:{CAM_H + bh}:0:0:black[cam];"
+                      f"[cam][game]vstack=inputs=2,ass={ass_name}[v]")
+        else:
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,fps=30[cam];"
+                      f"[cam][game]vstack=inputs=2,"
+                      f"drawbox=y={CAM_H - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
     else:
         graph += f";\n[game]ass={ass_name}[v]"
     (cwd / "graph.txt").write_text(graph)

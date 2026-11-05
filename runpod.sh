@@ -10,6 +10,15 @@ git pull -q 2>/dev/null || true
 
 echo "▶ Ставлю ffmpeg и шрифты…"
 apt-get update -qq && apt-get install -y -qq ffmpeg fonts-dejavu-core fontconfig >/dev/null
+# жирный шрифт для субтитров как у топовых шортсов
+if ! fc-list | grep -q "Montserrat-Black"; then
+  mkdir -p /usr/share/fonts/truetype/montserrat
+  for w in Black ExtraBold; do
+    curl -fsSL -o /usr/share/fonts/truetype/montserrat/Montserrat-$w.ttf \
+      "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-$w.ttf" || true
+  done
+  fc-cache -f >/dev/null 2>&1 || true
+fi
 
 echo "▶ Ставлю Python-библиотеки (1–3 минуты)…"
 pip install -q --root-user-action=ignore -r requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
