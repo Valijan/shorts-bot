@@ -45,7 +45,7 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
             "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto", "pbar": "auto",
             "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on",
-            "camp_label": "", "camp_tags": ""}
+            "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
@@ -141,6 +141,7 @@ def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="— 🎛 Пресет в одну кнопку —", callback_data="noop")],
         presets[:2], presets[2:],
+        [InlineKeyboardButton(text="💰 Кампании (условия блогеров)", callback_data="camp:list:-")],
         *[[InlineKeyboardButton(text=title, callback_data=f"menu:{k}")] for k, (title, _) in MENUS.items()],
     ])
 
@@ -170,7 +171,110 @@ def settings_text(uid: int) -> str:
             f"Субтитры: {_label('subs', st['subs'])} {_label('sub_color', st['sub_color'])} "
             f"{st['sub_size'].upper()} · Кадр: {_label('mode', st['mode'])}\n"
             f"Эффекты: {_label('fx', st['fx'])} · Музыка: {_label('music', st['music'])}\n"
-            f"Ник на видео: {html.escape(st['mark']) or 'нет (/watermark)'} · Автостоп: {stop}")
+            f"Ник на видео: {html.escape(st['mark']) or 'нет (/watermark)'} · Автостоп: {stop}\n"
+            f"💰 Кампания: {html.escape(st['camp_label']) or 'нет (/campaigns)'}")
+
+
+# ---------- Кампании (клиппинг у разных блогеров) ----------
+
+ONESHOT = {
+    "name": "Oneshot", "label": "TWITCH: Oneshotmlbb", "tags": "#oneshotmlbb #ваншотмлбб",
+    "min_len": 15, "game": "mlbb", "contact": "@rozhok_23", "window": "2 недели",
+    "rates": "50 000 — 1 000 ₽\n100 000 — 3 000 ₽\n150 000 — 5 000 ₽\n200 000 — 8 000 ₽\n"
+             "300 000 — 15 000 ₽\n400 000 — 20 000 ₽",
+    "rules": "Канал Twitch крупным шрифтом в видео. Без накрутки, без чужого контента и повторов.",
+}
+
+
+def get_camps(uid) -> dict:
+    data = load_all()
+    camps = data.get(f"camps:{uid}")
+    if camps is None:  # первый запуск — сразу кладём Oneshot
+        camps = {"oneshot": ONESHOT}
+        data[f"camps:{uid}"] = camps
+        SETTINGS_FILE.write_text(json.dumps(data))
+    return camps
+
+
+def save_camps(uid, camps: dict):
+    data = load_all()
+    data[f"camps:{uid}"] = camps
+    SETTINGS_FILE.write_text(json.dumps(data))
+
+
+def parse_campaign(text: str) -> dict:
+    """Достаёт условия из объявления блогера или из строк «Ключ: значение»."""
+    t = text or ""
+    c = {}
+    kv = dict((k.strip().lower(), v.strip()) for k, v in re.findall(r"^\s*([^:\n]{2,20}):\s*(.+)$", t, re.M))
+    c["name"] = kv.get("имя") or kv.get("name") or ""
+    tags = re.findall(r"#[\wа-яё]+", t, re.I)
+    c["tags"] = " ".join(dict.fromkeys(tags))
+    m = re.search(r"(twitch|kick|youtube|тви[тч]\w*)[^\n]{0,30}?\b([A-Za-z0-9_]{3,25})\b", t, re.I)
+    chan = kv.get("канал") or (m.group(2) if m else "")
+    if chan and not chan.lower().startswith(("twitch", "kick", "youtube")):
+        plat = "KICK" if m and "kick" in m.group(1).lower() else "TWITCH"
+        chan = f"{plat}: {chan}"
+    c["label"] = chan
+    mn = re.search(r"от\s*(\d{1,3})\s*сек", t, re.I) or re.search(r"мин\w*\.? длин\w*:\s*(\d+)", t, re.I)
+    c["min_len"] = int(mn.group(1)) if mn else 15
+    contacts = [x for x in re.findall(r"@[A-Za-z0-9_]{4,32}", t)]
+    c["contact"] = kv.get("контакт") or (contacts[-1] if contacts else "")
+    rates = [ln.strip("•-– ").strip() for ln in t.splitlines() if re.search(r"\d[\d .]*\s*(₽|руб|\$|сум)", ln)]
+    c["rates"] = kv.get("оплата") or "\n".join(rates[:10])
+    w = re.search(r"в течени[еи]\s+(\d+\s+[а-яёa-z]+|[а-яё]+\s+[а-яё]+)", t, re.I)
+    c["window"] = kv.get("срок") or (w.group(1).strip() if w else "")
+    g = re.search(r"mlbb|млбб|mobile legends|pubg|пабг", t, re.I)
+    c["game"] = ("pubg" if g and re.search(r"pubg|пабг", g.group(0), re.I) else "mlbb") if g else ""
+    if not c["name"]:
+        base = c["label"].split(":")[-1].strip() if c["label"] else (c["tags"].split()[0][1:] if c["tags"] else "")
+        c["name"] = base[:20] or "Кампания"
+    c["rules"] = kv.get("правила", "")
+    return c
+
+
+def camp_card(c: dict, active: bool = False) -> str:
+    return (f"{'✅ ' if active else ''}<b>{html.escape(c['name'])}</b>\n"
+            f"📺 На видео: {html.escape(c.get('label') or '—')}\n"
+            f"🏷 Теги: {html.escape(c.get('tags') or '—')}\n"
+            f"⏱ От {c.get('min_len', 15)} с · просмотры в течение: {html.escape(c.get('window') or '—')}\n"
+            f"💰 Оплата:\n{html.escape(c.get('rates') or '—')}\n"
+            f"💸 Модерация/выплаты: {html.escape(c.get('contact') or '—')}"
+            + (f"\n📌 {html.escape(c['rules'])}" if c.get("rules") else ""))
+
+
+def camps_kb(uid) -> InlineKeyboardMarkup:
+    camps, active = get_camps(uid), get_settings(uid).get("camp_id", "")
+    rows = []
+    for cid, c in camps.items():
+        rows.append([InlineKeyboardButton(text=("✅ " if cid == active else "▶️ ") + c["name"],
+                                          callback_data=f"camp:on:{cid}"),
+                     InlineKeyboardButton(text="ℹ️", callback_data=f"camp:info:{cid}"),
+                     InlineKeyboardButton(text="🗑", callback_data=f"camp:del:{cid}")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить блогера", callback_data="camp:add:-"),
+                 InlineKeyboardButton(text="⏹ Без кампании", callback_data="camp:off:-")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def activate_camp(uid, cid: str | None):
+    if not cid:
+        for k in ("camp_id", "camp_label", "camp_tags"):
+            set_setting(uid, k, "")
+        set_setting(uid, "camp_min", 0)
+        return
+    c = get_camps(uid)[cid]
+    set_setting(uid, "camp_id", cid)
+    set_setting(uid, "camp_label", c.get("label", ""))
+    set_setting(uid, "camp_tags", c.get("tags", ""))
+    set_setting(uid, "camp_min", int(c.get("min_len") or 0))
+    if c.get("game") in ("mlbb", "pubg"):
+        set_setting(uid, "content", c["game"])
+
+
+CAMPS_HELP = ("💰 <b>Кампании</b> — условия блогеров, которые платят за клипы.\n"
+              "Включённая кампания сама ставит канал автора крупно на видео, его теги и мин. длину.\n\n"
+              "Добавить: <code>/addcampaign</code> + вставь объявление блогера целиком "
+              "(бот сам найдёт канал, теги, ставки, контакт).")
 
 
 # ---------- Доступ и активность ----------
@@ -195,7 +299,7 @@ HELP = (
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
-    "/campaign Канал #тег — клиппинг-кампания (канал крупно + теги)\n"
+    "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
     "/stop — выключить сервер сейчас · /id — твой ID"
 )
@@ -233,6 +337,62 @@ async def watermark(m: Message):
                               "Убрать: <code>/watermark off</code>")
     set_setting(m.from_user.id, "mark", val)
     await m.answer(f"✅ Ник на видео: {html.escape(val) or 'убран'}")
+
+
+@router.message(Command("campaigns"))
+async def campaigns(m: Message):
+    await m.answer(CAMPS_HELP, reply_markup=camps_kb(m.from_user.id))
+
+
+@router.message(Command("addcampaign"))
+async def add_campaign(m: Message):
+    body = (m.text or "").split(maxsplit=1)[1:] or [""]
+    if not body[0].strip():
+        return await m.answer("Отправь одним сообщением: <code>/addcampaign</code> и сразу ниже — текст "
+                              "объявления блогера (условия, теги, канал, контакт).\n\nИли вручную:\n"
+                              "<code>/addcampaign\nИмя: Блогер\nКанал: TWITCH: nick\nТеги: #tag1 #tag2\n"
+                              "Мин. длина: 15\nОплата: 100к — 2000 ₽\nКонтакт: @manager\nСрок: 2 недели</code>")
+    c = parse_campaign(body[0])
+    uid = m.from_user.id
+    camps = get_camps(uid)
+    cid = re.sub(r"\W+", "", c["name"].lower())[:20] or uuid.uuid4().hex[:6]
+    camps[cid] = c
+    save_camps(uid, camps)
+    await m.answer("✅ Добавил кампанию. Проверь, всё ли верно (если нет — пришли заново со строками "
+                   "«Канал:», «Теги:» и т.д.):\n\n" + camp_card(c),
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                       InlineKeyboardButton(text="▶️ Включить сейчас", callback_data=f"camp:on:{cid}"),
+                       InlineKeyboardButton(text="💰 Все кампании", callback_data="camp:list:-")]]))
+
+
+@router.callback_query(F.data.startswith("camp:"))
+async def on_camp(c: CallbackQuery):
+    _, act, cid = c.data.split(":", 2)
+    uid = c.from_user.id
+    camps = get_camps(uid)
+    text = CAMPS_HELP
+    if act == "on" and cid in camps:
+        activate_camp(uid, cid)
+        text = "✅ Включена кампания:\n\n" + camp_card(camps[cid], True)
+    elif act == "off":
+        activate_camp(uid, None)
+        text = "⏹ Кампания выключена — клипы без чужого канала и тегов.\n\n" + CAMPS_HELP
+    elif act == "info" and cid in camps:
+        text = camp_card(camps[cid], get_settings(uid).get("camp_id") == cid)
+    elif act == "del" and cid in camps:
+        name = camps.pop(cid)["name"]
+        save_camps(uid, camps)
+        if get_settings(uid).get("camp_id") == cid:
+            activate_camp(uid, None)
+        text = f"🗑 Удалил «{html.escape(name)}».\n\n" + CAMPS_HELP
+    elif act == "add":
+        await c.message.answer("Отправь <code>/addcampaign</code> и сразу ниже вставь объявление блогера.")
+        return await c.answer()
+    try:
+        await c.message.edit_text(text, reply_markup=camps_kb(uid))
+    except TelegramBadRequest:
+        await c.message.answer(text, reply_markup=camps_kb(uid))
+    await c.answer()
 
 
 @router.message(Command("campaign"))
@@ -665,6 +825,10 @@ def caption_for(r: dict, st: dict, segments, lang) -> str:
     body = (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
             f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
             f"<code>{html.escape(p['desc'])}\n\n{html.escape(p['tags'])}</code>")
+    camp = get_camps(st["_uid"]).get(st.get("camp_id", "")) if st.get("_uid") and st.get("camp_id") else None
+    if camp:
+        body += (f"\n\n💰 {html.escape(camp['name'])}: просмотры в течение {html.escape(camp.get('window') or '—')}, "
+                 f"выплаты — {html.escape(camp.get('contact') or '—')}")
     return (head + body)[:1024]
 
 
@@ -723,7 +887,7 @@ async def worker(bot: Bot):
                     else:
                         src = workdir / "source.mp4"
                         await bot.download_file(tg_file.file_path, destination=src)
-                st = {**get_settings(job["uid"]), **job.get("over", {})}
+                st = {**get_settings(job["uid"]), **job.get("over", {}), "_uid": job["uid"]}
                 if st.get("review") == "on" and not cfg.ANTHROPIC_API_KEY:
                     await bot.send_message(chat, "⚠️ Для «Обзора» нужен ключ Claude API. Режу без комментариев.")
                 A = await asyncio.to_thread(pipeline.analyze, src, st, progress)

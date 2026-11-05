@@ -21,7 +21,11 @@ def lengths_for(st):
     key = st.get("length", "auto")
     if key == "auto":
         key = AUTO_LEN.get(st.get("content"), "mid")
-    return LENGTHS.get(key, LENGTHS["mid"])
+    lmin, lmax = LENGTHS.get(key, LENGTHS["mid"])
+    need = int(st.get("camp_min") or 0)  # условие кампании «от N секунд»
+    if need > lmin:
+        lmin, lmax = need, max(lmax, need + 10)
+    return lmin, lmax
 GAMES = ("mlbb", "pubg")
 
 
