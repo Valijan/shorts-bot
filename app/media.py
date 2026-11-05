@@ -227,3 +227,35 @@ def progress_bar(src: Path, dst: Path, duration: float, color: str = "0xFFD400")
         "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(dst),
     ])
+
+
+def beep(src: Path, dst: Path, spans: list[tuple[float, float]]):
+    """Глушит мат и ставит писк 1 кГц."""
+    spans = [(max(0.0, a - 0.03), b + 0.03) for a, b in spans]
+    en = "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in spans)
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(src),
+        "-filter_complex",
+        f"[0:a]volume=0:enable='{en}'[m];"
+        f"sine=f=1000:r=44100,volume=0.35,aformat=channel_layouts=stereo,"
+        f"volume='if({en},1,0)':eval=frame[b];"
+        f"[m][b]amix=inputs=2:duration=first:normalize=0[a]",
+        "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", str(dst),
+    ])
+
+
+def loopify(src: Path, dst: Path, fade: float = 0.35):
+    """Петля: последние доли секунды плавно переходят в первый кадр — повтор без шва."""
+    dur = probe(src)["duration"]
+    if dur < 4:
+        raise RuntimeError("too short")
+    off = dur - fade
+    run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(src), "-i", str(src),
+        "-filter_complex",
+        f"[1:v]trim=0:{fade + 0.05:.2f},setpts=PTS-STARTPTS[h];"
+        f"[0:v][h]xfade=transition=fade:duration={fade}:offset={off:.3f}[v];"
+        f"[0:a]afade=t=out:st={off:.3f}:d={fade}[a]",
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
+    ])

@@ -1,4 +1,6 @@
 """Генерация субтитров ASS в стиле Shorts: крупно, 2–3 слова, текущее слово подсвечено."""
+import re
+
 from . import config as cfg
 
 HL = r"{\c&H00E5FF&}"  # жёлто-оранжевый (BGR)
@@ -17,9 +19,9 @@ def _esc(text: str) -> str:
 
 
 COLORS = {"yellow": "&H00E5FF&", "green": "&H66FF33&", "cyan": "&HFFE500&", "pink": "&HB04DFF&"}
-SIZES = {"s": 68, "m": 84, "l": 102}
+SIZES = {"s": 64, "m": 76, "l": 90}  # 60–75 px — норма для 1080x1920
 # позиция: (выравнивание ASS, отступ по вертикали)
-POS = {"bottom": (2, 560), "center": (5, 0), "top": (8, 430)}
+POS = {"bottom": (2, 600), "center": (5, 0), "top": (8, 430)}  # низ — выше кнопок приложений
 
 
 _FONT = None
@@ -43,7 +45,7 @@ def _header(style=None) -> str:
     f = font()
     size = SIZES.get(st.get("size", "m"), 84)
     if st.get("words") == 1:
-        size = int(size * 1.3)
+        size = int(size * 1.15)
     al, mv = POS.get(st.get("pos", "bottom"), (2, 560))
     if st.get("sub_y") and st.get("pos", "bottom") == "bottom":
         mv = 1920 - st["sub_y"]
@@ -58,7 +60,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Sub,{f},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,{al},70,70,{mv},1
+Style: Sub,{f},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,{al},110,170,{mv},1
 Style: Title,{f},66,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,8,80,80,230,1
 Style: Mark,{f},40,&H60FFFFFF,&H000000FF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,60,60,90,1
 Style: Hook,{f},90,&H00000000,&H000000FF,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,1,0,0,8,50,50,{hook_v},1
@@ -68,6 +70,24 @@ Style: Bar,{f},56,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+# ключевые слова — подсвечиваются цветом (числа, килы, герои MLBB, PUBG)
+KEYWORDS = re.compile(
+    r"^\d+[%x]?$|^(килл?|кил[лыа]?|убил\w*|сэвидж|savage|маньяк|maniac|трипл|triple|дабл|double|"
+    r"kill\w*|хэдшот\w*|хедшот\w*|headshot|клатч|clutch|вайп|ace|эйс|топ|победа|victory|лорд|"
+    r"черепах\w*|фанни|fanny|лин|ling|госу|gusion|ланс\w*|lancelot|хаябуса|hayabusa|чоу|chou|"
+    r"лейла|layla|мия|miya|алукард|alucard|кагура|kagura|бенедетта|benedetta|джулиан|julian|"
+    r"чикен|chicken|awm|м416|m416|авм|ультa|ульт\w*)$", re.I)
+SWEAR = re.compile(
+    r"(х[уy][йяеёию]|п[иеё]зд|[её]б[аеуиыо]|бля|сук[аи]|муда|пидор|залуп|шлюх|f+u+c+k|shit|bitch)", re.I)
+
+
+def censor_word(w: str) -> str:
+    core = w.strip(".,!?…")
+    if SWEAR.search(core):
+        return w.replace(core, core[0] + "*" * (len(core) - 1))
+    return w
 
 
 def _chunks_from_words(words, max_words=3, max_chars=16):
@@ -147,18 +167,26 @@ def build_ass(path, segments, start: float, end: float, title: str = "",
     elif mark:
         lines.append(f"Dialogue: 1,{_ts(0)},{_ts(dur)},Mark,,0,0,0,,{_esc(mark)}")
 
+    if st.get("censor"):
+        words = [{**w, "w": censor_word(w["w"])} for w in words]
     one = st.get("words") == 1
+    pop = r"{\fscx72\fscy72\t(0,90,\fscx100\fscy100)}" if st.get("anim", "pop") == "pop" else ""
+    kw_col = r"{\c" + COLORS.get(st.get("color", "yellow"), COLORS["yellow"]) + "}"
     chunks = [[w] for w in words] if one else _chunks_from_words(words)
     for ci, ch in enumerate(chunks):
         nxt = chunks[ci + 1][0]["s"] if ci + 1 < len(chunks) else dur
         ch_end = min(nxt, ch[-1]["e"] + 0.35)
         texts = [_esc(w["w"].upper() if upper else w["w"]) for w in ch]
+        # ключевые слова — цветом всегда (в режиме «по слову» и вне подсветки)
+        texts = [f"{kw_col}{t}{RESET}" if KEYWORDS.match(ch[i]["w"].strip(".,!?…")) else t
+                 for i, t in enumerate(texts)]
         for wi, w in enumerate(ch):
             w_end = ch[wi + 1]["s"] if wi + 1 < len(ch) else ch_end
             if w_end <= w["s"]:
                 continue
             parts = texts if one else [f"{hl}{t}{RESET}" if i == wi else t for i, t in enumerate(texts)]
-            lines.append(f"Dialogue: 0,{_ts(w['s'])},{_ts(w_end)},Sub,,0,0,0,,{' '.join(parts)}")
+            anim = pop if (one or wi == 0) else ""
+            lines.append(f"Dialogue: 0,{_ts(w['s'])},{_ts(w_end)},Sub,,0,0,0,,{anim}{' '.join(parts)}")
     path.write_text(_header(st) + "\n".join(lines) + "\n", encoding="utf-8")
 
 

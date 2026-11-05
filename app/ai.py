@@ -15,11 +15,20 @@ LANG_NAMES = {"ru": "русский", "uz": "узбекский (латиниц�
 
 # ---------- Речь ----------
 
-def transcribe(path, progress=None) -> dict:
+VOCAB = {
+    "mlbb": "Mobile Legends, MLBB, Savage, Maniac, Triple Kill, Double Kill, Wiped Out, Shut Down, "
+            "Лорд, Черепаха, ульта, гэнк, лес, роум, мид, голд, фарм, Фанни, Лин, Госу, Ланселот, "
+            "Хаябуса, Чоу, Лейла, Мия, Алукард, Кагура, Бенедетта, Джулиан, эмблема, сборка",
+    "pubg": "PUBG Mobile, нокнул, хэдшот, клатч, вайп, сквад, AWM, M416, Kar98, лут, ред зона, "
+            "Erangel, Miramar, Chicken Dinner, топ 1",
+}
+
+
+def transcribe(path, progress=None, content: str = "auto") -> dict:
     """GPU, а если видеокарта не поддерживается — автоматически CPU."""
     global _whisper
     try:
-        return _transcribe(path, progress)
+        return _transcribe(path, progress, content)
     except Exception as e:
         if cfg.WHISPER_DEVICE == "cpu":
             raise
@@ -27,7 +36,7 @@ def transcribe(path, progress=None) -> dict:
         cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, _whisper = "cpu", "int8", None
         if cfg.WHISPER_MODEL.startswith("large"):
             cfg.WHISPER_MODEL = "small"
-        return _transcribe(path, progress)
+        return _transcribe(path, progress, content)
 
 
 def _load_audio(path) -> np.ndarray:
@@ -41,7 +50,7 @@ def _load_audio(path) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def _transcribe(path, progress=None) -> dict:
+def _transcribe(path, progress=None, content: str = "auto") -> dict:
     global _whisper
     from faster_whisper import WhisperModel
 
@@ -51,9 +60,15 @@ def _transcribe(path, progress=None) -> dict:
             download_root=str(cfg.DATA_DIR / "models"),
         )
     audio = _load_audio(path)
-    segments, info = _whisper.transcribe(
-        audio, word_timestamps=True, vad_filter=True, beam_size=1,
-    )
+    vocab = VOCAB.get(content)
+    extra = {"initial_prompt": vocab, "hotwords": vocab} if vocab else {}
+    try:
+        segments, info = _whisper.transcribe(
+            audio, word_timestamps=True, vad_filter=True, beam_size=1, **extra)
+    except TypeError:  # старая faster-whisper без hotwords
+        segments, info = _whisper.transcribe(
+            audio, word_timestamps=True, vad_filter=True, beam_size=1,
+            **({"initial_prompt": vocab} if vocab else {}))
     out = []
     for s in segments:
         words = [{"s": w.start, "e": w.end, "w": w.word.strip()} for w in (s.words or []) if w.word.strip()]
@@ -392,3 +407,53 @@ def publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
     except Exception as e:
         log.warning("publish_text failed: %s", e)
         return base
+
+
+
+def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
+    """ИИ смотрит кадры в самые яркие секунды и находит баннеры килов на экране."""
+    import base64
+    import subprocess
+
+    if not cfg.ANTHROPIC_API_KEY or len(score) < 5:
+        return []
+    order = [int(t) for t in np.argsort(score)[::-1]]
+    picks = []
+    for t in order:
+        if all(abs(t - p) >= 4 for p in picks):
+            picks.append(t)
+        if len(picks) >= k:
+            break
+    picks.sort()
+    blocks = []
+    for i, t in enumerate(picks):
+        img = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t + 0.5:.2f}", "-i", str(src),
+                              "-frames:v", "1", "-vf", "scale=512:-2", "-f", "image2", "-c:v", "mjpeg",
+                              "-q:v", "6", "-"], capture_output=True).stdout
+        if img:
+            blocks += [{"type": "text", "text": f"Кадр {i} (t={t}s)"},
+                       {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                    "data": base64.b64encode(img).decode()}}]
+    if not blocks:
+        return []
+    game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile"}.get(content, content)
+    blocks.append({"type": "text", "text": f"""Это кадры геймплея {game}.
+Для каждого кадра определи, есть ли на экране баннер/надпись убийства (в MLBB: «Убил», Double/Triple Kill,
+Maniac, Savage, Wiped Out, Shut Down; в PUBG: «вы убили/нокаут», kill feed с вашим ником).
+Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"SAVAGE","w":10}}]}} — только кадры с убийством;
+w: 3 обычный кил, 4 double, 6 triple, 8 maniac, 10 savage, 7 wiped out/клатч."""})
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
+    msg = client.messages.create(model=cfg.CLAUDE_MODEL, max_tokens=1500,
+                                 messages=[{"role": "user", "content": blocks}])
+    data = _json("".join(b.text for b in msg.content if getattr(b, "type", "") == "text")) or {}
+    out = []
+    for e in data.get("kills", []):
+        try:
+            i = int(e["i"])
+            out.append({"t": float(picks[i]) + 0.5, "w": float(e.get("w", 3)), "kind": "kill",
+                        "label": str(e.get("label", "KILL"))[:20].upper()})
+        except (KeyError, ValueError, IndexError, TypeError):
+            continue
+    return out

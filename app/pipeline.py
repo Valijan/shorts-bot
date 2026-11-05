@@ -14,6 +14,14 @@ from . import config as cfg
 log = logging.getLogger(__name__)
 
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
+AUTO_LEN = {"mlbb": "short", "pubg": "short", "movie": "long"}  # игры 15–30 с — норма для Shorts
+
+
+def lengths_for(st):
+    key = st.get("length", "auto")
+    if key == "auto":
+        key = AUTO_LEN.get(st.get("content"), "mid")
+    return LENGTHS.get(key, LENGTHS["mid"])
 GAMES = ("mlbb", "pubg")
 
 
@@ -31,14 +39,15 @@ def style_of(st: dict, lay: dict | None = None) -> dict:
     t = st.get("title", "hook")
     style = {"color": st.get("sub_color", "yellow"), "size": st.get("sub_size", "m"),
              "pos": st.get("sub_pos", "bottom"), "title": t if t in ("on", "off", "hook") else "hook",
-             "mark": st.get("mark", ""), "words": 1 if one else 3}
+             "mark": st.get("mark", ""), "words": 1 if one else 3,
+             "censor": st.get("censor", "off") == "on", "anim": st.get("sub_anim", "pop")}
     if lay and lay.get("layout") == "stream":   # камера сверху, полоса с ником, геймплей
         top = lay["cam_h"] + lay["bar_h"]
-        style.update(banner_y=lay["cam_h"], sub_y=1520)
+        style.update(banner_y=lay["cam_h"], sub_y=1360)
         if lay["bar_h"]:
             style["bar_y"] = lay["cam_h"]
     elif lay:                                   # камера во весь экран
-        style.update(banner_y=300, sub_y=1420)
+        style.update(banner_y=300, sub_y=1320)
     return style
 
 
@@ -54,7 +63,7 @@ def analyze(src: Path, st: dict, progress) -> dict:
     segments, lang = [], None
     if info["audio"] and (sub_lang != "none" or (_use_llm() and not seq) or content in GAMES):
         progress("📝 Распознаю речь… 0%")
-        tr = ai.transcribe(src, lambda p: progress(f"📝 Распознаю речь… {int(p * 100)}%"))
+        tr = ai.transcribe(src, lambda p: progress(f"📝 Распознаю речь… {int(p * 100)}%"), content)
         segments, lang = tr["segments"], tr["lang"]
     progress("🎞 Ищу смены сцен и пики звука…")
     cuts = media.detect_cuts(src)
@@ -65,6 +74,15 @@ def analyze(src: Path, st: dict, progress) -> dict:
         motion = media.motion_per_sec(src)
     events = ai.game_events(segments, content) if content != "auto" else []
     score = ai.activity(dur, loud, motion, events)
+    if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
+        progress("👁 ИИ ищет килы на экране…")
+        try:
+            vis = ai.vision_events(src, score, content)
+            if vis:
+                events = events + vis
+                score = ai.activity(dur, loud, motion, events)
+        except Exception as e:
+            log.warning("vision events failed: %s", e)
     return {"info": info, "dur": dur, "segments": segments, "lang": lang, "cuts": cuts,
             "loud": loud, "motion": motion, "events": events, "score": score}
 
@@ -78,7 +96,7 @@ def _overlaps(c, used):
 def choose(A: dict, st: dict, n: int, used=(), lengths=None) -> list[dict]:
     dur, segments, cuts = A["dur"], A["segments"], A["cuts"]
     content = st.get("content", "auto")
-    lmin, lmax = lengths or LENGTHS.get(st.get("length", "mid"), (30, 45))
+    lmin, lmax = lengths or lengths_for(st)
     used = list(used)
 
     if st.get("ranges"):  # ручные таймкоды
@@ -194,7 +212,24 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
             review.mix(out, inserts, mixed)
             out = mixed
         out = _finish(out, d, c, st, info, progress, i, len(clips))
+        if st.get("censor") == "on" and info["audio"]:
+            bad = [(w["s"] - c["start"], w["e"] - c["start"]) for sg in seg_in for w in sg.get("words", [])
+                   if subs.SWEAR.search(w["w"])] if word_level else []
+            if bad:
+                try:
+                    bp = d / "beep.mp4"
+                    media.beep(out, bp, bad)
+                    out = bp
+                except Exception as e:
+                    log.warning("beep failed: %s", e)
         out = _teaser(out, d, c, st, info)
+        if st.get("loop", "auto") == "on" or (st.get("loop", "auto") == "auto" and st.get("content") in GAMES):
+            try:
+                lp = d / "loop.mp4"
+                media.loopify(out, lp)
+                out = lp
+            except Exception as e:
+                log.warning("loop failed: %s", e)
         if st.get("pbar", "auto") == "on" or (st.get("pbar", "auto") == "auto" and st.get("content") in GAMES):
             try:
                 pb = d / "pbar.mp4"
