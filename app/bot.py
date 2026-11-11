@@ -48,7 +48,8 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
-    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
+    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg"),
+                ("🚗 GTA 6", "gta")],
     "pick": [("🔥 Лучшие", "best"), ("📼 По порядку", "seq"), ("🏆 Топ-5", "top")],
     "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("Авто", "auto"), ("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
@@ -101,6 +102,9 @@ PRESETS = {
     "pubg": ("🔫 PUBG-стрим", {"content": "pubg", "pick": "best", "length": "auto", "mode": "game",
                                "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
                                "jumpcut": "auto", "teaser": "on", "director": "on"}),
+    "gta": ("🚗 GTA 6-стрим", {"content": "gta", "pick": "best", "length": "auto", "mode": "game",
+                              "title": "hook", "sub_words": "3", "sub_pos": "bottom", "fx": "auto",
+                              "jumpcut": "off", "teaser": "on", "director": "on"}),
     "movie": ("🎥 Фильм", {"content": "movie", "pick": "best", "length": "long", "mode": "auto",
                           "title": "hook", "sub_words": "3", "fx": "off", "jumpcut": "off",
                           "teaser": "off"}),
@@ -224,8 +228,9 @@ def parse_campaign(text: str) -> dict:
     c["rates"] = kv.get("оплата") or "\n".join(rates[:10])
     w = re.search(r"в течени[еи]\s+(\d+\s+[а-яёa-z]+|[а-яё]+\s+[а-яё]+)", t, re.I)
     c["window"] = kv.get("срок") or (w.group(1).strip() if w else "")
-    g = re.search(r"mlbb|млбб|mobile legends|pubg|пабг", t, re.I)
-    c["game"] = ("pubg" if g and re.search(r"pubg|пабг", g.group(0), re.I) else "mlbb") if g else ""
+    g = re.search(r"mlbb|млбб|mobile legends|pubg|пабг|gta|гта", t, re.I)
+    c["game"] = ("pubg" if re.search(r"pubg|пабг", g.group(0), re.I) else
+                 "gta" if re.search(r"gta|гта", g.group(0), re.I) else "mlbb") if g else ""
     if not c["name"]:
         base = c["label"].split(":")[-1].strip() if c["label"] else (c["tags"].split()[0][1:] if c["tags"] else "")
         c["name"] = base[:20] or "Кампания"
@@ -267,7 +272,7 @@ def activate_camp(uid, cid: str | None):
     set_setting(uid, "camp_label", c.get("label", ""))
     set_setting(uid, "camp_tags", c.get("tags", ""))
     set_setting(uid, "camp_min", int(c.get("min_len") or 0))
-    if c.get("game") in ("mlbb", "pubg"):
+    if c.get("game") in pipeline.GAMES:
         set_setting(uid, "content", c["game"])
 
 
@@ -295,8 +300,10 @@ class AccessMiddleware(BaseMiddleware):
 HELP = (
     "🎬 <b>Нарезка видео в Shorts</b>\n\n"
     "Пришли видеофайл (до 2 ГБ) или ссылку. В подписи можно указать:\n"
-    "• <code>mlbb 2</code>, <code>pubg</code>, <code>фильм 5</code> — тип видео и число клипов\n"
+    "• <code>mlbb 2</code>, <code>pubg</code>, <code>gta 10</code>, <code>фильм 5</code> — тип видео и число клипов\n"
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
+    "• <code>gta 2:00:00-4:00:00 ссылка</code> — из длинного эфира скачать и разобрать только это окно\n"
+    "• ссылка на запись Twitch — бот сам смотрит, где взрывался чат\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
@@ -549,6 +556,8 @@ def parse_overrides(text: str) -> dict:
         over["content"] = "mlbb"
     elif re.search(r"pubg|пабг|пубг", t):
         over["content"] = "pubg"
+    elif re.search(r"\bgta\b|\bгта\b|gta ?(6|vi)\b|гта ?6", t):
+        over["content"] = "gta"
     elif re.search(r"фильм|кино|movie|film|сериал", t):
         over["content"] = "movie"
     if re.search(r"\bтоп\b|\btop\b|подборк", t):
@@ -558,6 +567,24 @@ def parse_overrides(text: str) -> dict:
         over["clips"] = int(num.group(1))
     if ("content" in over or "clips" in over) and "pick" not in over:
         over["pick"] = "best"
+    return over
+
+
+SPAN_MIN = 300  # кусок длиннее 5 минут — это не клип, а окно эфира для разбора
+
+
+def split_span(over: dict) -> dict:
+    """Для ссылок: «2:00:00-4:00:00» значит «скачай и разбери только это окно»."""
+    long = [r for r in over.get("ranges", []) if r[1] - r[0] > SPAN_MIN]
+    if not long:
+        return over
+    over = dict(over)
+    over["span"] = long[0]
+    rest = [r for r in over["ranges"] if r[1] - r[0] <= SPAN_MIN]
+    if rest:
+        over["ranges"] = rest
+    else:
+        over.pop("ranges")
     return over
 
 
@@ -573,6 +600,8 @@ def describe_over(over: dict) -> str:
         bits.append(f"клипов: {over['clips']}")
     if over.get("ranges"):
         bits.append("куски: " + ", ".join(f"{fmt(a)}–{fmt(b)}" for a, b in over["ranges"]))
+    if over.get("span"):
+        bits.append(f"окно эфира: {fmt(over['span'][0])}–{fmt(over['span'][1])}")
     return "\n🎯 Для этого видео: " + ", ".join(bits)
 
 
@@ -616,7 +645,7 @@ async def on_file(m: Message):
 async def on_link(m: Message):
     url = URL_RE.search(m.text).group(0)
     await enqueue(m, {"type": "new", "src": "url", "url": url, "label": url[:40],
-                      "over": parse_overrides(m.text)})
+                      "over": split_span(parse_overrides(m.text))})
 
 
 @router.message(F.text)
@@ -779,23 +808,44 @@ async def autostop(bot: Bot):
 
 # ---------- Обработка ----------
 
-def ytdl(url: str, outdir: Path) -> Path:
-    from yt_dlp import YoutubeDL
+MAX_HOURS = float(os.getenv("MAX_HOURS", "6"))  # длиннее — просим указать окно
 
-    opts = {
-        "outtmpl": str(outdir / "source.%(ext)s"),
-        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
-        "merge_output_format": "mp4", "noplaylist": True, "quiet": True, "no_warnings": True,
-    }
+
+def ytdl(url: str, outdir: Path, span=None) -> Path:
+    """Скачивает видео по ссылке. span=(с, по) в секундах — только этот кусок эфира."""
+    from yt_dlp import YoutubeDL
+    from yt_dlp.utils import download_range_func
+
+    base = {"noplaylist": True, "quiet": True, "no_warnings": True}
     if cfg.YTDLP_COOKIES and Path(cfg.YTDLP_COOKIES).exists():
-        opts["cookiefile"] = cfg.YTDLP_COOKIES
+        base["cookiefile"] = cfg.YTDLP_COOKIES
     try:
+        with YoutubeDL(base) as y:
+            dur = float((y.extract_info(url, download=False) or {}).get("duration") or 0)
+        if span:
+            if dur and span[0] >= dur:
+                raise RuntimeError(f"Окно начинается после конца видео (оно идёт {fmt(dur)}).")
+            span = (span[0], min(span[1], dur) if dur else span[1])
+        length = (span[1] - span[0]) if span else dur
+        if length > MAX_HOURS * 3600:
+            raise RuntimeError(
+                f"Эфир идёт {fmt(dur)} — целиком это слишком долго и тяжело. Укажи окно до "
+                f"{int(MAX_HOURS)} часов, например:\ngta 2:00:00-4:00:00 {url}")
+        h = 1080 if length <= 5400 else 720   # длинные эфиры качаем в 720p — иначе не хватит диска
+        opts = {**base, "outtmpl": str(outdir / "source.%(ext)s"),
+                "format": f"bv*[height<={h}]+ba/b[height<={h}]/b", "merge_output_format": "mp4"}
+        if span:
+            opts["download_ranges"] = download_range_func(None, [span])
         with YoutubeDL(opts) as y:
             y.extract_info(url, download=True)
+    except RuntimeError:
+        raise
     except Exception as e:
         if "not a bot" in str(e) or "Sign in" in str(e):
             raise RuntimeError("YouTube не даёт скачать с сервера (просит вход). "
                                "Скачай видео на телефон и пришли сюда файлом — до 2 ГБ.") from None
+        if "subscriber" in str(e).lower():
+            raise RuntimeError("Эта запись Twitch только для подписчиков канала — скачать её нельзя.") from None
         raise
     files = sorted(outdir.glob("source.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not files:
@@ -804,20 +854,25 @@ def ytdl(url: str, outdir: Path) -> Path:
 
 
 def fmt(t: float) -> str:
+    if t >= 3600:
+        return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}"
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
 TAGS = {"mlbb": "#mlbb #mobilelegends #shorts", "pubg": "#pubgmobile #pubg #shorts",
+        "gta": "#gta6 #gta #shorts",
         "movie": "#фильм #кино #shorts", "auto": "#shorts"}
-TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "funny": "😂 Смешной момент"}
+TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "funny": "😂 Смешной момент",
+             "action": "🚔 Экшен"}
 
 
 def caption_for(r: dict, st: dict, segments, lang) -> str:
     kind = TYPE_ICON.get(r.get("type", ""), "") if r.get("content") in pipeline.GAMES else ""
     r = {**r, "title": (r.get("title") or "").replace("*", "")}
+    off = float(st.get("_offset") or 0)  # клип вырезан из окна эфира — показываем время оригинала
     head = (f"<b>{html.escape(r['title'] or 'Клип ' + str(r['index']))}</b>\n"
             + (f"{kind}\n" if kind else "")
-            + (f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n" if not r.get("text") else ""))
+            + (f"⏱ {fmt(r['start'] + off)}–{fmt(r['end'] + off)} из оригинала\n" if not r.get("text") else ""))
     if st.get("pubtext") != "on":
         return head + "\n" + (st.get("camp_tags", "") + " " + TAGS.get(r.get("content", "auto"), "#shorts")).strip()
     lang = st["subs"] if st["subs"] in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
@@ -879,7 +934,10 @@ async def worker(bot: Bot):
                 workdir.mkdir(parents=True, exist_ok=True)
                 await set_status("⬇️ Скачиваю видео…", force=True)
                 if job["src"] == "url":
-                    src = await asyncio.to_thread(ytdl, job["url"], workdir)
+                    span = job.get("over", {}).get("span")
+                    if span:
+                        await set_status(f"⬇️ Скачиваю окно эфира {fmt(span[0])}–{fmt(span[1])}…", force=True)
+                    src = await asyncio.to_thread(ytdl, job["url"], workdir, span)
                 else:
                     tg_file = await bot.get_file(job["file_id"])
                     if LOCAL and os.path.isabs(tg_file.file_path) and os.path.exists(tg_file.file_path):
@@ -887,7 +945,9 @@ async def worker(bot: Bot):
                     else:
                         src = workdir / "source.mp4"
                         await bot.download_file(tg_file.file_path, destination=src)
-                st = {**get_settings(job["uid"]), **job.get("over", {}), "_uid": job["uid"]}
+                st = {**get_settings(job["uid"]), **job.get("over", {}), "_uid": job["uid"],
+                      "_url": job.get("url") if job["src"] == "url" else None,
+                      "_offset": (job.get("over", {}).get("span") or (0,))[0] if job["src"] == "url" else 0}
                 if st.get("review") == "on" and not cfg.ANTHROPIC_API_KEY:
                     await bot.send_message(chat, "⚠️ Для «Обзора» нужен ключ Claude API. Режу без комментариев.")
                 A = await asyncio.to_thread(pipeline.analyze, src, st, progress)

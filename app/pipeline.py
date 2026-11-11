@@ -8,13 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ai, fx, gamecam, media, reframe, review, subs
+from . import ai, chat, fx, gamecam, media, reframe, review, subs
 from . import config as cfg
 
 log = logging.getLogger(__name__)
 
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
-AUTO_LEN = {"mlbb": "short", "pubg": "short", "movie": "long"}  # игры 15–30 с — норма для Shorts
+AUTO_LEN = {"mlbb": "short", "pubg": "short", "movie": "long",  # игры 15–30 с — норма для Shorts
+            "gta": "mid"}  # GTA: моменту нужен контекст (погоня, баг, реакция)
 
 
 def lengths_for(st):
@@ -26,7 +27,7 @@ def lengths_for(st):
     if need > lmin:
         lmin, lmax = need, max(lmax, need + 10)
     return lmin, lmax
-GAMES = ("mlbb", "pubg")
+GAMES = ("mlbb", "pubg", "gta")
 
 
 class Cancelled(Exception):
@@ -79,18 +80,27 @@ def analyze(src: Path, st: dict, progress) -> dict:
         progress("⚡ Ищу экшен: движение, вспышки, килл-моменты…")
         motion = media.motion_per_sec(src)
     events = ai.game_events(segments, content) if content != "auto" else []
-    score = ai.activity(dur, loud, motion, events)
+    chat_rate = None
+    if chat.vod_id(st.get("_url")) and not seq:
+        progress("💬 Смотрю, где взрывался чат Twitch…")
+        chat_rate, chat_ev = chat.signal(
+            st.get("_url"), dur, float(st.get("_offset") or 0),
+            lambda p: progress(f"💬 Смотрю, где взрывался чат Twitch… {int(p * 100)}%"))
+        if chat_ev and content != "auto":
+            events = events + chat_ev
+    score = ai.activity(dur, loud, motion, events, chat_rate)
     if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
         progress("👁 ИИ ищет килы на экране…")
         try:
             vis = ai.vision_events(src, score, content)
             if vis:
                 events = events + vis
-                score = ai.activity(dur, loud, motion, events)
+                score = ai.activity(dur, loud, motion, events, chat_rate)
         except Exception as e:
             log.warning("vision events failed: %s", e)
     return {"info": info, "dur": dur, "segments": segments, "lang": lang, "cuts": cuts,
-            "loud": loud, "motion": motion, "events": events, "score": score}
+            "loud": loud, "motion": motion, "events": events, "score": score,
+            "chat": chat_rate is not None}
 
 
 # ---------- 2. Выбор моментов ----------
@@ -128,7 +138,8 @@ def choose(A: dict, st: dict, n: int, used=(), lengths=None) -> list[dict]:
             log.warning("LLM pick failed: %s", e)
     if not clips:
         if game or lengths:
-            clips = ai.pick_game(dur, A["score"], A["events"], want, lmin, lmax)
+            clips = ai.pick_game(dur, A["score"], A["events"], want, lmin, lmax,
+                                 "action" if content == "gta" else "kill")
         elif content == "movie":
             clips = ai.pick_heuristic(dur, A["score"], cuts, segments, want, lmin, lmax)
         else:

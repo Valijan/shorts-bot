@@ -21,6 +21,9 @@ VOCAB = {
             "Хаябуса, Чоу, Лейла, Мия, Алукард, Кагура, Бенедетта, Джулиан, эмблема, сборка",
     "pubg": "PUBG Mobile, нокнул, хэдшот, клатч, вайп, сквад, AWM, M416, Kar98, лут, ред зона, "
             "Erangel, Miramar, Chicken Dinner, топ 1",
+    "gta": "GTA 6, GTA VI, Grand Theft Auto, Вайс-Сити, Vice City, Леонида, Leonida, Джейсон, Люсия, "
+           "Rockstar, миссия, копы, розыск, звёзды, погоня, ограбление, потрачено, wasted, busted, "
+           "пасхалка, баг, тачка, угнал",
 }
 
 
@@ -115,6 +118,15 @@ GOAL = {
  funny — смешные моменты: реакция, фейлы, троллинг, неожиданности.
 Клип начинается за 2–4 с до перестрелки и заканчивается сразу после последнего килла/панчлайна.
 Требования:""",
+    "gta": """Это стрим по GTA 6 (Grand Theft Auto VI). Ищи до {n} моментов трёх типов:
+ funny — баги и глитчи, фейлы, нелепые смерти (WASTED), смешная физика, шутки и бурная реакция стримера;
+ action — погони с полицией, перестрелки, взрывы, трюки на машинах, ограбления, яркие сцены миссий;
+ tip — пасхалки, секреты, где найти машину/оружие/деньги, как пройти миссию, сравнение с GTA 5.
+События «ЧАТ 🔥/ЧАТ 😂» в сигналах — секунды, когда чат зрителей взорвался: это почти всегда сильный момент.
+Клип начинается за 3–5 с до события (чтобы было понятно, что происходит) и заканчивается
+сразу после развязки или реакции стримера. Сюжетные спойлеры (катсцены концовки) не бери.
+В поле type пиши funny, action или tip.
+Требования:""",
 }
 
 
@@ -137,7 +149,7 @@ def pick_llm(segments, n, lmin, lmax, title_lang, content="auto", signals="") ->
 
 Для каждого дай заголовок-крючок для плашки в начале ролика ({LANG_NAMES.get(title_lang, 'русский')} язык,
 до 40 символов, лучше вопрос или интрига, без хэштегов; самое сильное слово выдели звёздочками, напр. «iPhone *худшая* платформа?»)
-и тип: kill, tip, funny или best.
+и тип: kill, tip, funny, action или best.
 
 Ответь ТОЛЬКО JSON без пояснений:
 {{"clips":[{{"start":12.3,"end":48.0,"title":"...","type":"best","score":9}}]}}
@@ -195,6 +207,16 @@ _EV = {
         (r"head ?shot|хэд ?шот|хедшот|в голову|ван ?шот|one ?shot", 4, "kill", "HEADSHOT"),
         (r"нокнул|кнокнул|knock|упал|минус|убил|killed|kill", 3, "kill", "KILL"),
     ],
+    "gta": [
+        (r"wasted|потрачено|busted|арестован", 5, "funny", "WASTED"),
+        (r"\bбаг\w*|глитч|glitch|\bbug\b|сломал\w* игр|провалил\w* под|застрял", 5, "funny", "БАГ"),
+        (r"погон\w+|копы|мусора|полици\w+|розыск|пять зв[её]зд|5 зв[её]зд|вертол[её]т|wanted|cops", 4,
+         "action", "ПОГОНЯ"),
+        (r"взорвал\w*|взрыв\w*|взлетел\w*|explo\w+|бабах|ограблен\w+|heist|перестрелк\w+", 4,
+         "action", "ЭКШЕН"),
+        (r"пасхалк\w+|easter egg|секрет\w*|отсылк\w+|нашёл|нашел|смотрите что", 4, "tip", "ПАСХАЛКА"),
+        (r"mission passed|миссия (пройдена|выполнена)|прош[её]л миссию", 3, "action", "МИССИЯ"),
+    ],
 }
 _COMMON = [
     (r"ах[аx]+|ха-?ха|хах|лол|\blol\b|ору|угар|ржу|смех|laugh|хи-?хи", 4, "funny", "😂"),
@@ -240,10 +262,12 @@ def _z(a, n):
     return np.clip((a - np.median(a)) / (np.std(a) + 1e-6), -2, 4)
 
 
-def activity(duration, loud, motion, events) -> np.ndarray:
-    """Яркость каждой секунды: громкость + действие на экране + события."""
+def activity(duration, loud, motion, events, chat=None) -> np.ndarray:
+    """Яркость каждой секунды: громкость + действие на экране + чат зрителей + события."""
     n = int(duration) + 1
     sc = 0.9 * _z(loud, n) + 0.7 * _z(motion, n)
+    if chat is not None and len(chat) > 1 and float(np.max(chat)) > 0:
+        sc += 1.1 * _z(chat, n)
     k = np.exp(-0.5 * (np.arange(-6, 7) / 2.5) ** 2)
     ev = np.zeros(n)
     for e in events:
@@ -280,11 +304,14 @@ def chain_span(events, ev):
     return max(0.0, min(start, first - 2.5)), ev["t"] + 2.5
 
 
-def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
+_KIND_TYPE = {"chat": "funny"}   # пик чата без уточнения считаем смешным/ярким моментом
+
+
+def pick_game(duration, score, events, n, lmin, lmax, default_type="kill") -> list[dict]:
     """Без ИИ: сначала серии килов целиком (от первого до последнего), потом пики экшена."""
     L = int(min(lmax, max(lmin, (lmin + lmax) / 2)))
     if duration <= L + 1:
-        return [{"start": 0.0, "end": duration, "title": "", "score": 5, "type": "kill"}]
+        return [{"start": 0.0, "end": duration, "title": "", "score": 5, "type": default_type}]
     picked = []
 
     def free(a, b):
@@ -316,7 +343,8 @@ def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
         best = max(inside, key=lambda x: (x["w"], x["kind"] == "kill")) if inside else None
         picked.append({"start": float(s), "end": float(e),
                        "title": best["label"] if best and best["kind"] == "kill" else "",
-                       "score": float(sm[peak]), "type": best["kind"] if best else "kill"})
+                       "score": float(sm[peak]),
+                       "type": _KIND_TYPE.get(best["kind"], best["kind"]) if best else default_type})
         if len(picked) >= n:
             break
     return picked
@@ -417,10 +445,12 @@ def split_sequential(duration, segments, cuts, lmin, lmax) -> list[dict]:
 _BASE_TAGS = {
     "mlbb": "#mlbb #mobilelegends #mobilelegendsbangbang #mlbbshorts #shorts",
     "pubg": "#pubgmobile #pubg #pubgm #pubgshorts #shorts",
+    "gta": "#gta6 #gtavi #gta #гта6 #gta6moments #shorts",
     "movie": "#фильм #кино #моменты #shorts",
     "auto": "#shorts #viral",
 }
-_TYPE_WORD = {"kill": "килл-момент", "tip": "полезный совет", "funny": "смешной момент"}
+_TYPE_WORD = {"kill": "килл-момент", "tip": "полезный совет", "funny": "смешной момент",
+              "action": "экшен-момент"}
 
 
 def publish_text(clip: dict, segments, content: str, lang: str = "ru", must_tags: str = "") -> dict:
@@ -435,6 +465,7 @@ def publish_text(clip: dict, segments, content: str, lang: str = "ru", must_tags
 def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
     tags = _BASE_TAGS.get(content, _BASE_TAGS["auto"])
     fallback_title = clip.get("title") or {"mlbb": "Этот момент в MLBB 🔥", "pubg": "Жёсткий момент в PUBG Mobile",
+                                           "gta": "Этот момент в GTA 6 🔥",
                                            "movie": "Лучший момент фильма"}.get(content, "Смотри до конца 👀")
     base = {"title": fallback_title[:90],
             "desc": f"{_TYPE_WORD.get(clip.get('type'), 'лучший момент').capitalize()}. "
@@ -488,7 +519,16 @@ def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
     if not blocks:
         return []
     game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile"}.get(content, content)
-    blocks.append({"type": "text", "text": f"""Это кадры геймплея {game}.
+    if content == "gta":
+        blocks.append({"type": "text", "text": """Это кадры стрима по GTA 6.
+Отметь только кадры с ярким событием: надпись WASTED/ПОТРАЧЕНО или BUSTED, взрыв, авария или полёт машины,
+погоня с полицией (звёзды розыска, мигалки, вертолёт), перестрелка, явный баг/глитч (персонаж или машина
+в невозможном положении), надпись MISSION PASSED. Обычная езда, меню, катсцены-разговоры — не событие.
+Ответь ТОЛЬКО JSON: {"kills":[{"i":0,"label":"WASTED","kind":"funny","w":6}]}
+kind: funny (wasted, busted, баг, нелепая авария) или action (погоня, взрыв, перестрелка, миссия);
+w: 3 обычный момент, 5 яркий, 7 очень зрелищный."""})
+    else:
+        blocks.append({"type": "text", "text": f"""Это кадры геймплея {game}.
 Для каждого кадра определи, есть ли на экране баннер/надпись убийства (в MLBB: «Убил», Double/Triple Kill,
 Maniac, Savage, Wiped Out, Shut Down; в PUBG: «вы убили/нокаут», kill feed с вашим ником).
 Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"SAVAGE","w":10}}]}} — только кадры с убийством;
@@ -503,7 +543,9 @@ w: 3 обычный кил, 4 double, 6 triple, 8 maniac, 10 savage, 7 wiped out
     for e in data.get("kills", []):
         try:
             i = int(e["i"])
-            out.append({"t": float(picks[i]) + 0.5, "w": float(e.get("w", 3)), "kind": "kill",
+            kind = str(e.get("kind", "action")) if content == "gta" else "kill"
+            out.append({"t": float(picks[i]) + 0.5, "w": float(e.get("w", 3)),
+                        "kind": kind if kind in ("funny", "action") else "action" if content == "gta" else "kill",
                         "label": str(e.get("label", "KILL"))[:20].upper()})
         except (KeyError, ValueError, IndexError, TypeError):
             continue
