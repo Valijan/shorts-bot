@@ -67,27 +67,45 @@ def analyze(src: Path, st: dict, progress) -> dict:
     progress("🔍 Анализирую видео…")
     info = media.probe(src)
     dur = info["duration"]
-    segments, lang = [], None
-    if info["audio"] and (sub_lang != "none" or (_use_llm() and not seq) or content in GAMES):
-        progress("📝 Распознаю речь… 0%")
-        tr = ai.transcribe(src, lambda p: progress(f"📝 Распознаю речь… {int(p * 100)}%"), content)
-        segments, lang = tr["segments"], tr["lang"]
-    progress("🎞 Ищу смены сцен и пики звука…")
-    cuts = media.detect_cuts(src)
+    segments, lang, covered = [], None, None   # covered=None — распознано всё видео
+    progress("🎚 Ищу пики звука…")
     loud = media.loudness_per_sec(src) if info["audio"] else np.zeros(1)
     motion = np.zeros(1)
     if content != "auto" and not seq:
         progress("⚡ Ищу экшен: движение, вспышки, килл-моменты…")
         motion = media.motion_per_sec(src)
-    events = ai.game_events(segments, content) if content != "auto" else []
-    chat_rate = None
+    chat_rate, chat_ev = None, []
     if chat.vod_id(st.get("_url")) and not seq:
         progress("💬 Смотрю, где взрывался чат Twitch…")
         chat_rate, chat_ev = chat.signal(
             st.get("_url"), dur, float(st.get("_offset") or 0),
             lambda p: progress(f"💬 Смотрю, где взрывался чат Twitch… {int(p * 100)}%"))
-        if chat_ev and content != "auto":
-            events = events + chat_ev
+        if content == "auto":
+            chat_ev = []
+    if info["audio"] and (sub_lang != "none" or (_use_llm() and not seq) or content in GAMES):
+        spans = None
+        long_video = dur > cfg.FAST_STT_MIN
+        if st.get("ranges") and long_video:
+            spans = []      # куски заданы вручную — речь распознаем только в них, перед монтажом
+        elif content in GAMES and not seq and long_video and st.get("stt", "auto") != "full":
+            spans = ai.hot_windows(ai.activity(dur, loud, motion, chat_ev, chat_rate), dur,
+                                   cfg.FAST_STT_SHARE)
+        if spans is None:
+            progress("📝 Распознаю речь… 0%")
+            tr = ai.transcribe(src, lambda p: progress(f"📝 Распознаю речь… {int(p * 100)}%"), content,
+                               duration=dur, loud=loud)
+            segments, lang = tr["segments"], tr["lang"]
+        else:
+            covered = spans
+            if spans:
+                mins = sum(b - a for a, b in spans) / 60
+                note = f"📝 Распознаю речь в ярких местах ({mins:.0f} из {dur / 60:.0f} мин)…"
+                progress(f"{note} 0%")
+                tr = ai.transcribe(src, lambda p: progress(f"{note} {int(p * 100)}%"), content, spans=spans)
+                segments, lang = tr["segments"], tr["lang"]
+    progress("🎞 Ищу смены сцен…")
+    cuts = media.detect_cuts(src)
+    events = (ai.game_events(segments, content) if content != "auto" else []) + chat_ev
     score = ai.activity(dur, loud, motion, events, chat_rate)
     if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
         progress("👁 ИИ ищет килы на экране…")
@@ -100,7 +118,7 @@ def analyze(src: Path, st: dict, progress) -> dict:
             log.warning("vision events failed: %s", e)
     return {"info": info, "dur": dur, "segments": segments, "lang": lang, "cuts": cuts,
             "loud": loud, "motion": motion, "events": events, "score": score,
-            "chat": chat_rate is not None}
+            "chat": chat_rate is not None, "covered": covered}
 
 
 # ---------- 2. Выбор моментов ----------
@@ -133,7 +151,8 @@ def choose(A: dict, st: dict, n: int, used=(), lengths=None) -> list[dict]:
     if _use_llm() and (segments or game) and not lengths:
         try:
             signals = ai.signals_text(A["score"], A["events"]) if content != "auto" else ""
-            clips = ai.pick_llm(segments, want, lmin, lmax, title_lang, content, signals)
+            clips = ai.pick_llm(segments, want, lmin, lmax, title_lang, content, signals,
+                                partial=A.get("covered") is not None)
         except Exception as e:  # не падаем — уходим на алгоритм
             log.warning("LLM pick failed: %s", e)
     if not clips:
@@ -168,6 +187,28 @@ def _attach(clips, A):
     return clips
 
 
+def ensure_speech(src: Path, A: dict, clips: list[dict], content: str, progress=None, pad: float = 1.0):
+    """Если речь распознавалась выборочно — дораспознаёт её в выбранных клипах (для субтитров)."""
+    cov = A.get("covered")
+    if cov is None or not A["info"]["audio"]:
+        return
+    need = []
+    for c in clips:
+        need += ai.missing_spans(cov + need, max(0.0, c["start"] - pad), min(A["dur"], c["end"] + pad))
+    if not need:
+        return
+    if progress:
+        progress("📝 Дораспознаю речь в выбранных клипах…")
+    try:
+        tr = ai.transcribe(src, None, content, spans=ai.merge_spans(need), lang=A.get("lang"))
+    except Exception as e:  # клип выйдет без субтитров, но выйдет
+        log.warning("extra transcription failed: %s", e)
+        return
+    A["segments"] = sorted(A["segments"] + tr["segments"], key=lambda s: s["s"])
+    A["lang"] = A.get("lang") or tr["lang"]
+    A["covered"] = ai.merge_spans(cov + need)
+
+
 # ---------- 3. Монтаж ----------
 
 def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progress,
@@ -175,6 +216,7 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
     content = st.get("content", "auto")
     if content in GAMES and st.get("mode", "auto") == "auto":
         st = {**st, "mode": "game"}  # игровой макет: весь кадр сверху + крупно герой снизу
+    ensure_speech(src, A, clips, content, progress)
     info, segments, cuts, lang = A["info"], A["segments"], A["cuts"], A["lang"]
     sub_lang = st.get("subs", "orig")
     use_llm = _use_llm()
@@ -404,6 +446,7 @@ def compile_top(src: Path, workdir: Path, st: dict, A: dict, progress, k=5, piec
     if not parts:
         raise RuntimeError("Не нашёл ярких моментов для подборки")
     parts.sort(key=lambda c: c.get("score", 0))  # слабый первым, лучший — последним
+    ensure_speech(src, A, parts, st.get("content", "auto"), progress)
     d = workdir / "top"
     d.mkdir(exist_ok=True)
     listing, t, segs, labels, cuts_all, fx_t = [], 0.0, [], [], [], []
@@ -429,7 +472,8 @@ def compile_top(src: Path, workdir: Path, st: dict, A: dict, progress, k=5, piec
     joined = workdir / "top_src.mp4"
     media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", "list.txt",
                "-c", "copy", str(joined)], cwd=d)
-    A2 = {**A, "segments": segs, "events": [], "cuts": cuts_all, "score": np.zeros(int(t) + 1)}
+    A2 = {**A, "segments": segs, "events": [], "cuts": cuts_all, "score": np.zeros(int(t) + 1),
+          "covered": None}
     clip = {"start": 0.0, "end": t, "title": "", "labels": labels, "cuts": cuts_all,
             "fx_t": fx_t, "fx_big": 0, "type": "kill", "text": "Топ-5 моментов"}
     res = render(joined, workdir, {**st, "fx": "on" if st.get("fx") != "off" else "off"}, A2,

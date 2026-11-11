@@ -27,11 +27,22 @@ VOCAB = {
 }
 
 
-def transcribe(path, progress=None, content: str = "auto") -> dict:
-    """GPU, а если видеокарта не поддерживается — автоматически CPU."""
+CHUNK = 900  # с: длинный звук распознаём кусками, чтобы не держать его целиком в памяти
+
+
+def transcribe(path, progress=None, content: str = "auto", spans=None, lang=None,
+               duration=None, loud=None) -> dict:
+    """Речь -> сегменты со словами. GPU, а если видеокарта не поддерживается — автоматически CPU.
+
+    spans — список (с, по) в секундах: распознать только эти куски (время в ответе — от начала файла).
+    Без spans распознаётся всё видео, но кусками по CHUNK секунд (нужна duration).
+    lang — уже известный язык, чтобы не определять его заново.
+    """
     global _whisper
+    if spans is None:
+        spans = split_chunks(duration, loud) if duration else [(0.0, None)]
     try:
-        return _transcribe(path, progress, content)
+        return _transcribe(path, progress, content, spans, lang)
     except Exception as e:
         if cfg.WHISPER_DEVICE == "cpu":
             raise
@@ -39,21 +50,86 @@ def transcribe(path, progress=None, content: str = "auto") -> dict:
         cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, _whisper = "cpu", "int8", None
         if cfg.WHISPER_MODEL.startswith("large"):
             cfg.WHISPER_MODEL = "small"
-        return _transcribe(path, progress, content)
+        return _transcribe(path, progress, content, spans, lang)
 
 
-def _load_audio(path) -> np.ndarray:
-    """Звук 16 кГц моно через ffmpeg (без PyAV — у него ломается совместимость)."""
+def split_chunks(duration: float, loud=None, chunk: int = CHUNK) -> list[tuple[float, float]]:
+    """Режет всё видео на куски ~chunk секунд; границу ставит в самую тихую секунду рядом (±8 с),
+    чтобы не разрубить слово."""
+    if duration <= chunk * 1.3:
+        return [(0.0, float(duration))]
+    out, a = [], 0.0
+    while duration - a > chunk * 1.3:
+        b = a + chunk
+        if loud is not None and len(loud) > b + 8:
+            lo = int(b) - 8
+            b = float(lo + int(np.argmin(loud[lo:int(b) + 9])))
+        out.append((a, b))
+        a = b
+    out.append((a, float(duration)))
+    return out
+
+
+def hot_windows(score, duration: float, share: float = 0.3, before: int = 40, after: int = 30,
+                min_total: int = 600):
+    """Самые яркие места видео (по звуку, движению, чату) как куски (с, по) — речь распознаём только там.
+    Возвращает None, если выгоды нет и проще распознать всё."""
+    budget = max(min_total, share * duration)
+    if budget >= duration * 0.8 or len(score) < 10:
+        return None
+    sm = np.convolve(score, np.ones(5) / 5, mode="same")
+    spans = []
+    for peak in np.argsort(sm)[::-1]:
+        t = int(peak)
+        if any(a <= t <= b for a, b in spans):
+            continue
+        spans = merge_spans(spans + [(max(0.0, t - before), min(float(duration), t + after))])
+        if sum(b - a for a, b in spans) >= budget:   # считаем реальное покрытие, без наложений
+            break
+    return spans
+
+
+def merge_spans(spans) -> list[tuple[float, float]]:
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1] + 0.5:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((float(a), float(b)))
+    return out
+
+
+def missing_spans(covered, start: float, end: float, min_len: float = 1.5):
+    """Какие части [start, end] ещё не распознаны."""
+    need, t = [], start
+    for a, b in sorted(covered):
+        if b <= t:
+            continue
+        if a >= end:
+            break
+        if a > t:
+            need.append((t, min(a, end)))
+        t = max(t, b)
+    if t < end:
+        need.append((t, end))
+    return [(a, b) for a, b in need if b - a >= min_len]
+
+
+def _load_audio(path, start=None, end=None) -> np.ndarray:
+    """Звук 16 кГц моно через ffmpeg (без PyAV — у него ломается совместимость).
+    start/end — взять только этот кусок, остальное в память не попадает."""
     import subprocess
 
+    seek = ["-ss", f"{start:.3f}"] if start else []
+    cut = ["-t", f"{end - (start or 0):.3f}"] if end is not None else []
     raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000",
+        ["ffmpeg", "-v", "error", *seek, "-i", str(path), *cut, "-vn", "-ac", "1", "-ar", "16000",
          "-f", "s16le", "-"], capture_output=True, check=True,
     ).stdout
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def _transcribe(path, progress=None, content: str = "auto") -> dict:
+def _transcribe(path, progress, content, spans, lang=None) -> dict:
     global _whisper
     from faster_whisper import WhisperModel
 
@@ -62,23 +138,43 @@ def _transcribe(path, progress=None, content: str = "auto") -> dict:
             cfg.WHISPER_MODEL, device=cfg.WHISPER_DEVICE, compute_type=cfg.WHISPER_COMPUTE,
             download_root=str(cfg.DATA_DIR / "models"),
         )
-    audio = _load_audio(path)
     vocab = VOCAB.get(content)
-    extra = {"initial_prompt": vocab, "hotwords": vocab} if vocab else {}
-    try:
-        segments, info = _whisper.transcribe(
-            audio, word_timestamps=True, vad_filter=True, beam_size=1, **extra)
-    except TypeError:  # старая faster-whisper без hotwords
-        segments, info = _whisper.transcribe(
-            audio, word_timestamps=True, vad_filter=True, beam_size=1,
-            **({"initial_prompt": vocab} if vocab else {}))
-    out = []
-    for s in segments:
-        words = [{"s": w.start, "e": w.end, "w": w.word.strip()} for w in (s.words or []) if w.word.strip()]
-        out.append({"s": s.start, "e": s.end, "t": s.text.strip(), "words": words})
-        if progress and info.duration:
-            progress(min(s.end / info.duration, 1.0))
-    return {"lang": info.language, "segments": out}
+    total = sum((b - a) for a, b in spans if b is not None) or 0.0
+    out, done, guess = [], 0.0, None
+    for a, b in spans:
+        audio = _load_audio(path, a, b)
+        length = len(audio) / 16000
+        if length < 0.3:
+            continue
+        kw = {"word_timestamps": True, "vad_filter": True, "beam_size": 1}
+        if vocab:
+            kw.update(initial_prompt=vocab, hotwords=vocab)
+        if lang:
+            kw["language"] = lang
+        try:
+            segments, info = _whisper.transcribe(audio, **kw)
+        except TypeError:  # старая faster-whisper без hotwords
+            kw.pop("hotwords", None)
+            segments, info = _whisper.transcribe(audio, **kw)
+        got = False
+        for s in segments:
+            words = [{"s": w.start + a, "e": w.end + a, "w": w.word.strip()}
+                     for w in (s.words or []) if w.word.strip()]
+            out.append({"s": s.start + a, "e": s.end + a, "t": s.text.strip(), "words": words})
+            got = True
+            if progress:
+                progress(min((done + s.end) / (total or length), 1.0))
+        if not lang:  # язык фиксируем по первому куску, где реально есть речь
+            if got and getattr(info, "language_probability", 1.0) >= 0.5:
+                lang = info.language
+            elif guess is None:
+                guess = info.language
+        done += length
+        if progress:
+            progress(min(done / (total or length), 1.0))
+        del audio
+    out.sort(key=lambda s: s["s"])
+    return {"lang": lang or guess, "segments": out}
 
 
 # ---------- Claude ----------
@@ -130,13 +226,16 @@ GOAL = {
 }
 
 
-def pick_llm(segments, n, lmin, lmax, title_lang, content="auto", signals="") -> list[dict]:
+def pick_llm(segments, n, lmin, lmax, title_lang, content="auto", signals="", partial=False) -> list[dict]:
     lines = [f"[{s['s']:.1f}-{s['e']:.1f}] {s['t']}" for s in segments if s["t"]]
     transcript = "\n".join(lines) or "(речи почти нет — опирайся на сигналы)"
     if len(transcript) > 400_000:  # очень длинное видео — берём равномерно
         k = len(transcript) / 400_000
         transcript = "\n".join(lines[:: int(np.ceil(k))])
     goal = GOAL.get(content, GOAL["auto"]).format(n=n)
+    if partial:
+        transcript += ("\n\n(Расшифровка неполная: речь распознана только в самых ярких участках видео. "
+                       "Между ними речь тоже есть, просто не показана — там опирайся на сигналы.)")
     sig = f"\n\nСИГНАЛЫ (секунда: громкость/действие/события, выше = ярче):\n{signals}" if signals else ""
     prompt = f"""Ты — опытный монтажёр YouTube Shorts. Ниже расшифровка видео с таймкодами в секундах.
 

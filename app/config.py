@@ -23,6 +23,9 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny/base/small/medium/large-v3
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")  # cpu / cuda
 WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
+# Длинные игровые видео: речь распознаётся только в ярких местах (быстрее в разы).
+FAST_STT_MIN = _int("FAST_STT_MIN", 1200)       # с какой длины видео (секунды) включать
+FAST_STT_SHARE = _int("FAST_STT_SHARE", 30) / 100  # какую долю видео распознавать, %
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 ALLOWED_USERS = {

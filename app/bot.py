@@ -44,7 +44,7 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "subs": "orig", "mode": "auto", "sub_color": "yellow", "sub_size": "m",
             "sub_pos": "bottom", "title": "hook", "sub_words": "auto", "fx": "auto", "music": "off", "review": "off",
             "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto", "pbar": "auto",
-            "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on",
+            "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on", "stt": "auto",
             "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
@@ -74,6 +74,7 @@ OPTIONS = {
     "censor": [("Без цензуры", "off"), ("🤐 Запикивать мат", "on")],
     "sub_anim": [("💥 Выпрыгивают", "pop"), ("Без анимации", "none")],
     "vision": [("👁 ИИ видит килы", "on"), ("Выкл", "off")],
+    "stt": [("⚡ Только яркие места", "auto"), ("Весь эфир", "full")],
     "autostop": [("Выкл", 0), ("15 мин", 15), ("30 мин", 30), ("60 мин", 60)],
 }
 TITLES = {"content": "Что за видео", "pick": "Как резать", "clips": "Сколько клипов",
@@ -87,9 +88,10 @@ TITLES = {"content": "Что за видео", "pick": "Как резать", "c
           "pbar": "Полоска прогресса внизу", "loop": "Петля (конец → начало)",
           "censor": "Мат (для монетизации)", "sub_anim": "Анимация субтитров",
           "vision": "Поиск килов по кадрам (нужен ключ Claude)",
+          "stt": "Распознавание речи в играх длиннее 20 мин",
           "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
-    "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm", "vision"]),
+    "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm", "vision", "stt"]),
     "look": ("🎨 Оформление", ["mode", "director", "title", "subs", "sub_words", "sub_anim", "sub_color", "sub_size", "sub_pos", "censor"]),
     "fx": ("✨ Эффекты и звук", ["fx", "jumpcut", "teaser", "loop", "pbar", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
