@@ -282,6 +282,13 @@ CAMPS_HELP = ("💰 <b>Кампании</b> — условия блогеров,
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
+        if not cfg.ALLOWED_USERS and not cfg.PUBLIC_BOT:
+            # список не задан — бот закрыт для всех, иначе любой тратил бы ключ Claude и время пода
+            if isinstance(event, Message) and user:
+                await event.answer(
+                    f"🔒 Бот ещё не настроен. Твой ID: <code>{user.id}</code>\n"
+                    f"Впиши его в файл .env: <code>ALLOWED_USERS={user.id}</code> и перезапусти бота.")
+            return
         if cfg.ALLOWED_USERS and user and user.id not in cfg.ALLOWED_USERS:
             if isinstance(event, Message):
                 await event.answer(f"⛔ Нет доступа. Ваш ID: <code>{user.id}</code>")
@@ -822,14 +829,23 @@ def caption_for(r: dict, st: dict, segments, lang) -> str:
         return head + "\n" + (st.get("camp_tags", "") + " " + TAGS.get(r.get("content", "auto"), "#shorts")).strip()
     lang = st["subs"] if st["subs"] in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
     p = ai.publish_text(r, segments, r.get("content", "auto"), lang, st.get("camp_tags", ""))
-    body = (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
-            f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
-            f"<code>{html.escape(p['desc'])}\n\n{html.escape(p['tags'])}</code>")
     camp = get_camps(st["_uid"]).get(st.get("camp_id", "")) if st.get("_uid") and st.get("camp_id") else None
+    tail = ""
     if camp:
-        body += (f"\n\n💰 {html.escape(camp['name'])}: просмотры в течение {html.escape(camp.get('window') or '—')}, "
-                 f"выплаты — {html.escape(camp.get('contact') or '—')}")
-    return (head + body)[:1024]
+        tail = (f"\n\n💰 {html.escape(camp['name'])}: просмотры в течение {html.escape(camp.get('window') or '—')}, "
+                f"выплаты — {html.escape(camp.get('contact') or '—')}")
+
+    def body(desc):
+        return (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
+                f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
+                f"<code>{html.escape(desc)}\n\n{html.escape(p['tags'])}</code>")
+
+    # лимит подписи Telegram — 1024 символа; укорачиваем описание, а не режем готовый HTML
+    desc = p["desc"]
+    while len(head + body(desc) + tail) > 1024 and desc:
+        desc = desc[:max(0, len(desc) - 40)].rstrip()
+    cap = head + body(desc) + tail
+    return cap if len(cap) <= 1024 else head[:1024]
 
 
 async def worker(bot: Bot):
@@ -868,9 +884,24 @@ async def worker(bot: Bot):
                                  duration=int(r["end"] - r["start"]), supports_streaming=True,
                                  request_timeout=600)
 
+        async def send_clip_safe(r, st, A):
+            """Одна попытка повтора; если клип так и не ушёл — сообщаем и идём дальше."""
+            for attempt in (1, 2):
+                try:
+                    return await send_clip(r, st, A)
+                except Exception as e:
+                    log.warning("send clip %s failed (try %d): %s", r.get("index"), attempt, e)
+                    err = e
+                    await asyncio.sleep(3)
+            try:
+                await bot.send_message(chat, f"⚠️ Клип {r.get('index')} не отправился "
+                                             f"({html.escape(str(err)[:150])}). Продолжаю остальные.")
+            except Exception:
+                pass
+
         def on_clip_factory(st, A):
             def on_clip(r):
-                asyncio.run_coroutine_threadsafe(send_clip(r, st, A), loop).result()
+                asyncio.run_coroutine_threadsafe(send_clip_safe(r, st, A), loop).result()
             return on_clip
 
         try:

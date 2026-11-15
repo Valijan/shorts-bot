@@ -33,7 +33,7 @@ if [ ! -f .env ]; then
   if [ -z "$T" ]; then
     echo "▶ Настройка бота"
     read -rp "Токен бота (от @BotFather): " T
-    read -rp "Твой Telegram ID (Enter — пропустить): " U
+    read -rp "Твой Telegram ID (без него бот закрыт; узнать — написать боту, он покажет): " U
     read -rp "Ключ Claude API (Enter — пропустить): " K
   fi
   cat > .env <<ENV

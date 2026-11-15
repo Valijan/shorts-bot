@@ -245,7 +245,9 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
                 log.warning("progress bar failed: %s", e)
         final = d / f"short_{i}.mp4"
         out.replace(final)
-        raw.unlink(missing_ok=True)
+        for p in d.iterdir():  # промежуточные рендеры (framed, fx, teaser…) больше не нужны
+            if p != final and p.is_file():
+                p.unlink(missing_ok=True)
         r = {"path": final, "title": c.get("title", ""), "start": c.get("orig_start", c["start"]),
              "end": c.get("orig_end", c["end"]),
              "type": c.get("type", ""), "content": content, "index": i, "total": len(clips),

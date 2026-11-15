@@ -29,6 +29,9 @@ ALLOWED_USERS = {
     int(x) for x in os.getenv("ALLOWED_USERS", "").replace(" ", "").split(",") if x.strip()
 }
 
+# Пустой ALLOWED_USERS = бот закрыт. Открыть для всех можно только явно: PUBLIC_BOT=1
+PUBLIC_BOT = os.getenv("PUBLIC_BOT", "0") == "1"
+
 SUB_FONT = os.getenv("SUB_FONT", "DejaVu Sans")
 SHOW_TITLE = os.getenv("SHOW_TITLE", "1") == "1"
 WATERMARK = os.getenv("WATERMARK", "")  # например @mychannel
