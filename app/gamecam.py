@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config as cfg
-from .media import H, W, run
+from .media import H, W, run, venc
 from .reframe import _detectors, _smooth
 
 log = logging.getLogger(__name__)
@@ -288,6 +288,6 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
         "-map", "[v]", "-map", "0:a:0?", "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        *venc(),
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)

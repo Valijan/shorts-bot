@@ -1,11 +1,52 @@
 """Работа с видео: анализ, поиск склеек, громкость, трекинг лица, рендер 9:16."""
+import contextvars
 import json
+import logging
+import os
 import subprocess
 from pathlib import Path
 
 import numpy as np
 
+log = logging.getLogger(__name__)
 W, H = 1080, 1920
+
+# Финальный ли это проход. Промежуточные проходы пишутся почти без потерь и быстро,
+# сжатие «для публикации» делается один раз — в последнем проходе.
+FINAL = contextvars.ContextVar("final_pass", default=True)
+_nvenc = None
+
+
+def nvenc() -> bool:
+    """Можно ли сжимать видео на видеокарте (NVENC). VIDEO_ENCODER=cpu|gpu|auto."""
+    global _nvenc
+    if _nvenc is None:
+        mode = os.getenv("VIDEO_ENCODER", "auto").lower()
+        if mode == "cpu":
+            _nvenc = False
+        else:
+            r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2",
+                                "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True, text=True)
+            _nvenc = r.returncode == 0
+            if mode == "gpu" and not _nvenc:
+                log.warning("VIDEO_ENCODER=gpu, но NVENC недоступен: %s", r.stderr[-200:])
+        log.info("video encoder: %s", "NVENC (видеокарта)" if _nvenc else "libx264 (процессор)")
+    return _nvenc
+
+
+def venc(final: bool | None = None) -> list[str]:
+    """Параметры видеокодека для прохода: final — качество для публикации, иначе промежуточное."""
+    if final is None:
+        final = FINAL.get()
+    if nvenc():
+        if final:
+            return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "21",
+                    "-b:v", "0", "-maxrate", "12M", "-bufsize", "24M", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_nvenc", "-preset", "p3", "-rc", "constqp", "-qp", "14", "-pix_fmt", "yuv420p"]
+    if final:
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-maxrate", "12M", "-bufsize", "24M",
+                "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "13", "-pix_fmt", "yuv420p"]
 
 
 def run(cmd, cwd=None):
@@ -69,13 +110,19 @@ def detect_cuts(path: Path) -> list[float]:
         return []
 
 
-def extract(src: Path, start: float, end: float, dst: Path):
-    """Точная вырезка фрагмента (с перекодированием, чтобы не было рывков на старте)."""
+def extract(src: Path, start: float, end: float, dst: Path, keep=None, audio: bool = True):
+    """Точная вырезка фрагмента, сразу в 30 к/с. keep — куски (с от начала клипа), которые
+    оставить: паузы вырезаются в этом же проходе, без отдельного пережатия."""
+    vf, af = "fps=30", []
+    if keep:
+        expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+        vf += f",select='{expr}',setpts=N/FRAME_RATE/TB"
+        if audio:
+            af = ["-af", f"aselect='{expr}',asetpts=N/SR/TB"]
     run([
         "ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(src),
-        "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
-        "-c:a", "aac", "-b:a", "192k", str(dst),
+        "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, *af,
+        *venc(False), "-c:a", "aac", "-b:a", "192k", str(dst),
     ])
 
 
@@ -159,7 +206,7 @@ def render(clip: Path, out: Path, ass_name: str, mode: str, src_w: int, src_h: i
         args = ["-filter_complex", fc, "-map", "[v]", "-map", "0:a:0?"]
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, *args, "-r", "30",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+        *venc(),
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)
 
@@ -196,7 +243,7 @@ def jumpcut(src: Path, keep: list[tuple[float, float]], dst: Path):
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
         "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
         "-af", f"aselect='{expr}',asetpts=N/SR/TB",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
+        *venc(False), "-c:a", "aac", "-b:a", "192k",
         str(dst),
     ])
 
@@ -212,8 +259,7 @@ def teaser(src: Path, at: float, dst: Path, length: float = 1.5):
          f"[tv][ta][mv][0:a]concat=n=2:v=1:a=1[v][a]")
     run([
         "ffmpeg", "-y", "-v", "error", "-i", str(src), "-filter_complex", g,
-        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
+        "-map", "[v]", "-map", "[a]", *venc(), "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
     ])
 
 
@@ -224,8 +270,7 @@ def progress_bar(src: Path, dst: Path, duration: float, color: str = "0xFFD400")
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
         "-filter_complex", f"color=c={color}:s={W}x14:r=30[c];"
                            f"[0:v][c]overlay=x='-W+W*t/{d:.3f}':y=H-14:shortest=1[v]",
-        "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(dst),
+        "-map", "[v]", "-map", "0:a?", *venc(), "-c:a", "copy", "-movflags", "+faststart", str(dst),
     ])
 
 
@@ -256,6 +301,56 @@ def loopify(src: Path, dst: Path, fade: float = 0.35):
         f"[1:v]trim=0:{fade + 0.05:.2f},setpts=PTS-STARTPTS[h];"
         f"[0:v][h]xfade=transition=fade:duration={fade}:offset={off:.3f}[v];"
         f"[0:a]afade=t=out:st={off:.3f}:d={fade}[a]",
-        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
+        "-map", "[v]", "-map", "[a]", *venc(), "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(dst),
     ])
+
+
+def tail(src: Path, dst: Path, teaser_at: float | None = None, loop: bool = False, pbar: bool = False,
+         has_audio: bool = True, color: str = "0xFFD400", length: float = 1.5, fade: float = 0.35) -> bool:
+    """Тизер в начале, петля в конце и полоска прогресса — одним проходом вместо трёх пережатий.
+    Возвращает False, если делать нечего."""
+    dur = probe(src)["duration"]
+    g, v, a = [], "[0:v]", "[0:a]" if has_audio else None
+    if teaser_at is not None:
+        t0 = max(0.0, teaser_at - length * 0.55)
+        t1 = t0 + length
+        g.append(f"[0:v]split=2[tsrc][msrc];"
+                 f"[tsrc]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
+                 f"fade=t=out:st={length - 0.12:.3f}:d=0.12:color=white[tv];"
+                 f"[msrc]fade=t=in:st=0:d=0.15:color=white[mv];[tv][mv]concat=n=2:v=1:a=0[tz]")
+        v = "[tz]"
+        if a:
+            g.append(f"[0:a]asplit=2[as1][as2];[as1]atrim=start={t0:.3f}:end={t1:.3f},asetpts=PTS-STARTPTS[ta];"
+                     f"[ta][as2]concat=n=2:v=0:a=1[az]")
+            a = "[az]"
+        dur += min(length, dur - t0)
+    if loop and dur >= 4:
+        off = dur - fade
+        g.append(f"{v}fps=30,settb=AVTB,split=2[l0][l1];[l1]trim=0:{fade + 0.05:.2f},setpts=PTS-STARTPTS[lh];"
+                 f"[l0][lh]xfade=transition=fade:duration={fade}:offset={off:.3f}[lz]")
+        v = "[lz]"
+        if a:
+            g.append(f"{a}afade=t=out:st={off:.3f}:d={fade}[alz]")
+            a = "[alz]"
+    if pbar:
+        g.append(f"color=c={color}:s={W}x14:r=30[pc];"
+                 f"{v}[pc]overlay=x='-W+W*t/{max(dur, 0.1):.3f}':y=H-14:shortest=1[pz]")
+        v = "[pz]"
+    if not g:
+        return False
+    amap = (["-map", a, "-c:a", "aac", "-b:a", "160k"] if a and a != "[0:a]"
+            else ["-map", "0:a?", "-c:a", "copy"])
+    run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-filter_complex", ";".join(g),
+         "-map", v, *amap, *venc(), "-movflags", "+faststart", str(dst)])
+    return True
+
+
+def to_delivery(path: Path):
+    """Сжать промежуточный (тяжёлый) файл для публикации — когда финальный проход не состоялся."""
+    try:
+        tmp = path.with_name("delivery.mp4")
+        run(["ffmpeg", "-y", "-v", "error", "-i", str(path), "-map", "0:v", "-map", "0:a?",
+             *venc(True), "-c:a", "copy", "-movflags", "+faststart", str(tmp)])
+        tmp.replace(path)
+    except Exception as e:
+        log.warning("to_delivery failed: %s", e)

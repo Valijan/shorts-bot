@@ -120,6 +120,41 @@ def test_live_chunks_and_window(tmp=Path("/tmp/shorts_live")):
     assert 2 <= overlap <= 6 and abs(b["duration"] - a["duration"] - overlap) < 1.0 and b["audio"]
 
 
+def test_soft_subtitles():
+    from app import subs
+    for w, want in [("Блять!", "Чёрт!"), ("пиздец", "кошмар"), ("НАХУЙ", "ПРОЧЬ"), ("похуй,", "всё равно,"),
+                    ("охуенно", "отличный"), ("заебись", "отлично"), ("сука", "зараза")]:
+        assert subs.soften_word(w) == want, (w, subs.soften_word(w))
+    for w in ("ребёнок", "ребята", "хлеб", "небо", "себе", "учебник", "худой", "сукно", "мудрый",
+              "потребовать", "поезд", "хуже", "оскорблять", "употреблять", "страхуй"):
+        assert subs.soften_word(w) == w, w
+
+
+def test_top5_fits_minute():
+    from app import pipeline
+    parts = [{"start": 100.0 * i, "end": 100.0 * i + 22, "fx_t": [3.0, 20.0]} for i in range(5)]
+    out = pipeline._fit_total(parts, 58.0)
+    assert abs(sum(c["end"] - c["start"] for c in out) - 58.0) < 0.01
+    assert all(c["end"] == 100.0 * i + 22 for i, c in enumerate(out))   # развязка в конце остаётся
+    assert all(0 <= t <= c["end"] - c["start"] for c in out for t in c["fx_t"])
+    short = [{"start": 0.0, "end": 8.0}, {"start": 50.0, "end": 60.0}]
+    assert pipeline._fit_total([dict(c) for c in short], 58.0) == short
+
+
+def test_tail_single_pass(tmp=Path("/tmp/shorts_tail")):
+    from app import media
+    tmp.mkdir(exist_ok=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1080x1920:r=30:d=12",
+                    "-f", "lavfi", "-i", "sine=f=440:d=12", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", str(tmp / "in.mp4")], check=True)
+    assert media.tail(tmp / "in.mp4", tmp / "out.mp4", teaser_at=8.0, loop=True, pbar=True)
+    p = media.probe(tmp / "out.mp4")
+    assert (p["w"], p["h"], p["audio"]) == (1080, 1920, True) and abs(p["duration"] - 13.5) < 0.2, p
+    assert not media.tail(tmp / "in.mp4", tmp / "none.mp4")
+    assert media.tail(tmp / "in.mp4", tmp / "pb.mp4", pbar=True, has_audio=True)
+    assert abs(media.probe(tmp / "pb.mp4")["duration"] - 12) < 0.2
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

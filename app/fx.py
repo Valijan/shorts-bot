@@ -3,7 +3,7 @@ import random
 from pathlib import Path
 
 from . import config as cfg
-from .media import H, W, run
+from .media import H, W, run, venc
 
 MUSIC_DIR = (cfg.DATA_DIR / "music").resolve()
 MUSIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,39 +40,47 @@ def punch(src: Path, out: Path, times: list[float], slowmo_at: float | None = No
         graph.append(f"{ins}amix=inputs={len(times) + 1}:duration=first:normalize=0,"
                      f"alimiter=limit=0.95[a]")
         amap = ["-map", "[a]"]
+    if slowmo_at is not None:  # замедление — в том же проходе, без второго пережатия
+        graph = [x.replace("[v]", "[pv]").replace("[a]", "[pa]") for x in graph]
+        graph += _slowmo_graph("[pv]", "[pa]" if has_audio else None, slowmo_at)
     (cwd / "fx.txt").write_text(";\n".join(graph))
-    tmp = out if slowmo_at is None else cwd / "fx_tmp.mp4"
     run(["ffmpeg", "-y", "-v", "error", "-i", src.name, "-filter_complex_script", "fx.txt",
-         "-map", "[v]", *amap, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-         tmp.name], cwd=cwd)
-    if slowmo_at is not None:
-        slowmo(tmp, out, slowmo_at, has_audio)
-        tmp.unlink(missing_ok=True)
+         "-map", "[v]", *amap, *venc(), "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+         out.name], cwd=cwd)
+
+
+def _slowmo_graph(vin: str, ain: str | None, at: float, length=0.7, factor=2.0) -> list[str]:
+    """Граф замедления куска [at-0.1, at+length] в factor раз. Выходы: [v] и [a]."""
+    a, b = max(0.0, at - 0.1), at + length
+    head = a >= 0.05  # кил в самом начале — куска «до» нет
+    n = 3 if head else 2
+    g = [f"{vin}split={n}" + ("[v0]" if head else "") + "[v1][v2]"]
+    if head:
+        g.append(f"[v0]trim=end={a},setpts=PTS-STARTPTS[p0]")
+    g += [f"[v1]trim=start={a}:end={b},setpts={factor}*(PTS-STARTPTS),fps=30[p1]",
+          f"[v2]trim=start={b},setpts=PTS-STARTPTS[p2]"]
+    vs = ("[p0]" if head else "") + "[p1][p2]"
+    if ain:
+        g.append(f"{ain}asplit={n}" + ("[a0]" if head else "") + "[a1][a2]")
+        if head:
+            g.append(f"[a0]atrim=end={a},asetpts=PTS-STARTPTS[q0]")
+        g += [f"[a1]atrim=start={a}:end={b},asetpts=PTS-STARTPTS,atempo={1 / factor}[q1]",
+              f"[a2]atrim=start={b},asetpts=PTS-STARTPTS[q2]"]
+        pairs = ("[p0][q0]" if head else "") + "[p1][q1][p2][q2]"
+        g.append(f"{pairs}concat=n={n}:v=1:a=1[v][a]")
+    else:
+        g.append(f"{vs}concat=n={n}:v=1:a=0[v]")
+    return g
 
 
 def slowmo(src: Path, out: Path, at: float, has_audio=True, length=0.7, factor=2.0):
     """Замедляет кусок [at-0.1, at+length] в factor раз."""
-    a, b = max(0.0, at - 0.1), at + length
     cwd = src.parent
-    g = (f"[0:v]split=3[v0][v1][v2];"
-         f"[v0]trim=end={a},setpts=PTS-STARTPTS[p0];"
-         f"[v1]trim=start={a}:end={b},setpts={factor}*(PTS-STARTPTS),fps=30[p1];"
-         f"[v2]trim=start={b},setpts=PTS-STARTPTS[p2];")
-    if has_audio:
-        g += (f"[0:a]asplit=3[a0][a1][a2];"
-              f"[a0]atrim=end={a},asetpts=PTS-STARTPTS[q0];"
-              f"[a1]atrim=start={a}:end={b},asetpts=PTS-STARTPTS,atempo={1 / factor}[q1];"
-              f"[a2]atrim=start={b},asetpts=PTS-STARTPTS[q2];"
-              f"[p0][q0][p1][q1][p2][q2]concat=n=3:v=1:a=1[v][a]")
-        maps = ["-map", "[v]", "-map", "[a]"]
-    else:
-        g += "[p0][p1][p2]concat=n=3:v=1:a=0[v]"
-        maps = ["-map", "[v]"]
-    (cwd / "slow.txt").write_text(g)
+    g = _slowmo_graph("[0:v]", "[0:a]" if has_audio else None, at, length, factor)
+    (cwd / "slow.txt").write_text(";\n".join(g))
+    maps = ["-map", "[v]"] + (["-map", "[a]"] if has_audio else [])
     run(["ffmpeg", "-y", "-v", "error", "-i", src.name, "-filter_complex_script", "slow.txt",
-         *maps, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name], cwd=cwd)
+         *maps, *venc(), "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name], cwd=cwd)
 
 
 def music_files() -> list[Path]:
