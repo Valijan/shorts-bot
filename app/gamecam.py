@@ -13,13 +13,13 @@ from pathlib import Path
 import numpy as np
 
 from . import config as cfg
-from .media import H, W, run
+from .media import H, W, run, venc
 from .reframe import _detectors, _smooth
 
 log = logging.getLogger(__name__)
 FPS = 4
 AW = 480
-CENTER_BIAS = {"mlbb": 0.3, "pubg": 0.5}   # герой / прицел обычно в центре экрана
+CENTER_BIAS = {"mlbb": 0.3, "pubg": 0.5, "gta": 0.5}   # герой / прицел обычно в центре экрана
 CAM_H = 540                                 # высота блока веб-камеры в раскладке stream
 BAR_H = 100                                 # полоса с ником под камерой
 
@@ -115,7 +115,7 @@ def _director(clip: Path, duration: float, content: str):
             j += 1
     if not imgs:
         return None
-    game = {"mlbb": "Mobile Legends", "pubg": "PUBG Mobile"}.get(content, "игра")
+    game = {"mlbb": "Mobile Legends", "pubg": "PUBG Mobile", "gta": "GTA 6"}.get(content, "игра")
     content_blocks = []
     for i, b in enumerate(imgs):
         content_blocks.append({"type": "text", "text": f"Кадр {i} (t={ts[i]:.1f}s)"})
@@ -288,6 +288,6 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
         "-map", "[v]", "-map", "0:a:0?", "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        *venc(),
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)

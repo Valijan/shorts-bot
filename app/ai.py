@@ -19,6 +19,8 @@ VOCAB = {
     "mlbb": "Mobile Legends, MLBB, Savage, Maniac, Triple Kill, Double Kill, Wiped Out, Shut Down, "
             "Лорд, Черепаха, ульта, гэнк, лес, роум, мид, голд, фарм, Фанни, Лин, Госу, Ланселот, "
             "Хаябуса, Чоу, Лейла, Мия, Алукард, Кагура, Бенедетта, Джулиан, эмблема, сборка",
+    "gta": "GTA 6, Grand Theft Auto VI, Вайс-Сити, Леонида, Джейсон, Люсия, wasted, потрачено, busted, "
+           "копы, розыск, пять звёзд, погоня, ограбление, миссия, пасхалка, тачка, угон",
     "pubg": "PUBG Mobile, нокнул, хэдшот, клатч, вайп, сквад, AWM, M416, Kar98, лут, ред зона, "
             "Erangel, Miramar, Chicken Dinner, топ 1",
 }
@@ -30,13 +32,30 @@ def transcribe(path, progress=None, content: str = "auto") -> dict:
     try:
         return _transcribe(path, progress, content)
     except Exception as e:
-        if cfg.WHISPER_DEVICE == "cpu":
-            raise
-        log.warning("GPU whisper failed (%s), switching to CPU", e)
+        if cfg.WHISPER_DEVICE == "cpu" or not _gpu_error(e):
+            raise  # отмена, битый файл и т.п. — это не повод уходить с видеокарты
+        log.warning("GPU whisper failed (%s), this video goes on CPU", e)
+        saved = (cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, cfg.WHISPER_MODEL)
         cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, _whisper = "cpu", "int8", None
         if cfg.WHISPER_MODEL.startswith("large"):
             cfg.WHISPER_MODEL = "small"
-        return _transcribe(path, progress, content)
+        try:
+            return _transcribe(path, progress, content)
+        finally:  # следующее видео снова пробует видеокарту
+            cfg.WHISPER_DEVICE, cfg.WHISPER_COMPUTE, cfg.WHISPER_MODEL = saved
+            _whisper = None
+
+
+_GPU_ERR = re.compile(r"cuda|cudnn|cublas|libcu|gpu|out of memory|device", re.I)
+
+
+def _gpu_error(e: Exception) -> bool:
+    """Ошибка именно видеокарты (нет библиотек, не хватило памяти), а не отмена/ffmpeg."""
+    import subprocess
+
+    if type(e).__name__ == "Cancelled" or isinstance(e, subprocess.CalledProcessError):
+        return False
+    return bool(_GPU_ERR.search(f"{type(e).__name__} {e}"))
 
 
 def _load_audio(path) -> np.ndarray:
@@ -108,6 +127,13 @@ GOAL = {
  tip — стример объясняет фишку: сборку, эмблемы, комбо, позиционирование, как контрить;
  funny — смешные моменты: реакция, фейлы, шутки, троллинг, неожиданности.
 Клип начинается за 2–4 с до начала драки и заканчивается сразу после последнего килла/панчлайна.
+Требования:""",
+    "gta": """Это геймплей GTA 6 (Grand Theft Auto VI). Ищи до {n} моментов трёх типов:
+ kill — экшен: погони с полицией, перестрелки, взрывы, аварии и трюки на транспорте, ограбления,
+        смерть (WASTED) или арест (BUSTED) в неожиданный момент, эффектный финал миссии;
+ tip — пасхалки, секреты, баги, скрытые места, полезные фишки игры;
+ funny — смешные моменты: физика и рэгдолл, реакции прохожих, фейлы, реакция стримера, абсурд.
+Клип начинается за 2–4 с до завязки и заканчивается сразу после развязки (взрыв, WASTED, панчлайн).
 Требования:""",
     "pubg": """Это геймплей PUBG Mobile. Ищи до {n} моментов трёх типов:
  kill — убийства и нокауты, хэдшоты, сквад-вайпы, клатчи 1 против нескольких, Winner Winner Chicken Dinner;
@@ -195,7 +221,18 @@ _EV = {
         (r"head ?shot|хэд ?шот|хедшот|в голову|ван ?шот|one ?shot", 4, "kill", "HEADSHOT"),
         (r"нокнул|кнокнул|knock|упал|минус|убил|killed|kill", 3, "kill", "KILL"),
     ],
+    # GTA: надписи WASTED/BUSTED на экране ловит ИИ по кадрам, по речи — что происходит у стримера
+    "gta": [
+        (r"wasted|потрачен", 6, "kill", "WASTED"),
+        (r"mission passed|миссия (выполнена|пройдена)", 6, "kill", "MISSION PASSED"),
+        (r"busted|арестован|повязали|приняли", 5, "kill", "BUSTED"),
+        (r"взрыв|взорвал|бабах|рванул|explo", 4, "kill", "ВЗРЫВ"),
+        (r"погон|копы|менты|полиц|зв[её]зд|розыск|wanted|cops", 3, "kill", "ПОГОНЯ"),
+        (r"ограблен|грабим|heist|\brob", 3, "kill", "ОГРАБЛЕНИЕ"),
+        (r"пасхалк|easter egg|секрет|глитч|glitch|\bбаг\b", 4, "tip", "💡"),
+    ],
 }
+SPEECH_ONLY = {"gta"}  # в этих играх нет диктора: слова стримера и есть сигнал, длина фразы не важна
 _COMMON = [
     (r"ах[аx]+|ха-?ха|хах|лол|\blol\b|ору|угар|ржу|смех|laugh|хи-?хи", 4, "funny", "😂"),
     (r"капец|жесть|офиг|бля|блин|what the|wtf|ничего себе|вау|wow|omg", 2, "funny", "😱"),
@@ -204,34 +241,52 @@ _COMMON = [
 ]
 
 
-ANNOUNCER_EN = re.compile(r"savage|maniac|triple|double|wiped|shut ?down|first blood|legendary|godlike|"
-                          r"unstoppable|rampage|winner|chicken", re.I)
+# Как диктор MLBB объявляет килы — и латиницей, и как это записывает Whisper на русском стриме.
+# Точные формы: «маньяк» — диктор, «маньяка (не дали)» — уже разговор стримера.
+ANNOUNCER = re.compile(
+    r"\b(savage|maniac|triple ?kill|double ?kill|wiped? ?out|shut ?down|first blood|legendary|godlike|"
+    r"unstoppable|rampage|сэвидж|севидж|сав[еэ]дж|маньяк|трипл ?кил+|дабл ?кил+|вайп ?аут|шат ?даун|"
+    r"легендари)\b", re.I)
+NO_ANNOUNCER = {"Лорд", "VICTORY"}  # у этих событий нет «дикторской» формы — хватает короткой фразы
+SHORT_WORDS, SHORT_WIN = 4, 1.5      # короткая фраза: до 4 слов в окне ±1.5 с
 
 
 def game_events(segments, content: str) -> list[dict]:
+    """События по речи. Кил засчитывается, только если это короткая реплика (диктор / выкрик),
+    а не слово внутри длинной фразы стримера («маньяка так и не дали»)."""
     rules = _EV.get(content, []) + _COMMON
     out = []
     for seg in segments:
-        n_words = len(seg["t"].split())
-        items = seg.get("words") or [{"s": seg["s"], "e": seg["e"], "w": seg["t"]}]
-        text_hits = set()
-        for w in items:
-            low = w["w"].lower()
-            for rx, wt, kind, label in rules:
-                if label not in text_hits and re.search(rx, low):
-                    text_hits.add(label)
-                    # диктор игры говорит коротко и по-английски; русское слово в длинной фразе —
-                    # это стример обсуждает («маньяка не дали»), а не сам момент
-                    if kind == "kill" and (n_words > 4 or not ANNOUNCER_EN.search(low)):
-                        out.append({"t": float(w["s"]), "w": wt * 0.3, "kind": "talk", "label": label})
-                    else:
-                        out.append({"t": float(w["s"]), "w": wt, "kind": kind, "label": label})
-        low = seg["t"].lower()  # фразы из нескольких слов («double kill»)
+        words = [w for w in (seg.get("words") or []) if w["w"].strip()]
+        if words:  # склеиваем слова, чтобы найти и фразы («double kill»), и точное время
+            starts, pos, parts = [], 0, []
+            for w in words:
+                starts.append(pos)
+                parts.append(w["w"].strip().lower())
+                pos += len(parts[-1]) + 1
+            low = " ".join(parts)
+        else:
+            low = seg["t"].lower()
         for rx, wt, kind, label in rules:
-            if label not in text_hits and re.search(rx, low):
-                strong = kind != "kill" or (n_words <= 4 and ANNOUNCER_EN.search(low))
-                out.append({"t": float(seg["s"]), "w": wt if strong else wt * 0.3,
-                            "kind": kind if strong else "talk", "label": label})
+            m = re.search(rx, low)
+            if not m:
+                continue
+            if words:
+                i = max(j for j, st in enumerate(starts) if st <= m.start())
+                t = float(words[i]["s"])
+                mid = (words[i]["s"] + words[i]["e"]) / 2
+                around = sum(1 for w in words if abs((w["s"] + w["e"]) / 2 - mid) <= SHORT_WIN)
+                phrase = " ".join(p for w, p in zip(words, parts)
+                                  if abs((w["s"] + w["e"]) / 2 - mid) <= SHORT_WIN)
+            else:
+                t, around, phrase = float(seg["s"]), len(low.split()), low
+            strong = True
+            if kind == "kill" and content not in SPEECH_ONLY:
+                strong = around <= SHORT_WORDS
+                if strong and content == "mlbb" and label not in NO_ANNOUNCER:
+                    strong = bool(ANNOUNCER.search(phrase))
+            out.append({"t": t, "w": wt if strong else wt * 0.3,
+                        "kind": kind if strong else "talk", "label": label})
     return out
 
 
@@ -257,27 +312,47 @@ def signals_text(score, events, limit=60) -> str:
     """Краткая сводка для ИИ: самые яркие секунды и найденные события."""
     top = sorted(np.argsort(score)[-limit:])
     lines = [f"{t}s: {score[t]:.1f}" for t in top]
-    lines += [f"{e['t']:.0f}s: событие {e['label']} ({e['kind']})" for e in events[:150]]
+    ev = sorted((e for e in events if e["kind"] != "talk"), key=lambda e: (e["kind"] != "kill", -e["w"]))[:150]
+    lines += [f"{e['t']:.0f}s: событие {e['label']} ({e['kind']})" for e in sorted(ev, key=lambda e: e["t"])]
     return "\n".join(lines)
 
 
-MULTI = {"DOUBLE KILL": 2, "TRIPLE KILL": 3, "MANIAC!": 4, "SAVAGE!": 5, "WIPED OUT": 5,
+MULTI = {"DOUBLE KILL": 2, "TRIPLE KILL": 3, "MANIAC": 4, "SAVAGE": 5, "WIPED OUT": 5,
          "LEGENDARY": 3, "CLUTCH": 4, "CHICKEN DINNER": 3}
 LOOKBACK = {1: 4, 2: 7, 3: 10, 4: 14, 5: 18}  # сколько секунд обычно длится серия из N килов
+CHAIN_GAP = 12                                # килы с паузой меньше — одна серия
+
+
+def _multi(label: str) -> int:
+    key = label.upper().rstrip("!").strip()  # «SAVAGE!» из речи и «SAVAGE» от ИИ по кадрам — одно и то же
+    return next((n for k, n in MULTI.items() if k in key), 1)
+
+
+def kill_chains(events) -> list[dict]:
+    """Серии килов: от первого кила до последнего (а не только до самого громкого)."""
+    kills = sorted((e for e in events if e["kind"] == "kill"), key=lambda e: e["t"])
+    chains = []
+    for e in kills:
+        if chains and e["t"] - chains[-1][-1]["t"] < CHAIN_GAP:
+            chains[-1].append(e)
+        else:
+            chains.append([e])
+    out = []
+    for ch in chains:
+        top = max(ch, key=lambda e: e["w"])
+        # если ранние килы серии не распознаны, отступаем назад по типу события (savage = 5 килов)
+        start = min(ch[0]["t"] - 2.5, top["t"] - LOOKBACK.get(_multi(top["label"]), 4))
+        out.append({"start": max(0.0, start), "end": ch[-1]["t"] + 2.5, "label": top["label"],
+                    "w": float(top["w"]), "peak": float(top["t"])})
+    return sorted(out, key=lambda c: -c["w"])
 
 
 def chain_span(events, ev):
-    """Начало и конец всей серии килов, которая закончилась событием ev."""
-    n = MULTI.get(ev["label"], 1)
-    start = ev["t"] - LOOKBACK.get(n, 4)
-    kills = sorted((e["t"] for e in events if e["kind"] == "kill" and e["t"] < ev["t"] - 0.3), reverse=True)
-    first = ev["t"]
-    for t in kills:  # предыдущие килы этой же серии (паузы < 12 с)
-        if first - t < 12:
-            first = t
-        else:
-            break
-    return max(0.0, min(start, first - 2.5)), ev["t"] + 2.5
+    """Начало и конец серии килов, в которую входит событие ev."""
+    for c in kill_chains(events):
+        if c["start"] <= ev["t"] <= c["end"]:
+            return c["start"], c["end"]
+    return max(0.0, ev["t"] - 4), ev["t"] + 2.5
 
 
 def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
@@ -290,18 +365,18 @@ def pick_game(duration, score, events, n, lmin, lmax) -> list[dict]:
     def free(a, b):
         return all(b <= p["start"] or a >= p["end"] for p in picked)
 
-    kills = sorted((e for e in events if e["kind"] == "kill"), key=lambda e: -e["w"])
-    for ev in kills:
-        a, b = chain_span(events, ev)
+    for c in kill_chains(events):
+        a, b = c["start"], c["end"]
         if b - a < lmin:  # короткая — добираем контекст до минимума
             pad = (lmin - (b - a)) / 2
             a, b = a - pad, b + pad
-        if b - a > lmax:  # слишком длинная — держим финал серии
+        if b - a > lmax:  # слишком длинная — главный кил серии должен остаться в кадре
+            b = min(b, max(c["peak"] + 2.5, a + lmax))
             a = b - lmax
         a, b = max(0.0, a), min(duration, b)
         if b - a >= min(lmin, 5) and free(a, b):
-            picked.append({"start": float(a), "end": float(b), "title": ev["label"],
-                           "score": float(ev["w"]) + 10, "type": "kill"})
+            picked.append({"start": float(a), "end": float(b), "title": c["label"],
+                           "score": c["w"] + 10, "type": "kill"})
         if len(picked) >= n:
             return picked
 
@@ -417,6 +492,7 @@ def split_sequential(duration, segments, cuts, lmin, lmax) -> list[dict]:
 _BASE_TAGS = {
     "mlbb": "#mlbb #mobilelegends #mobilelegendsbangbang #mlbbshorts #shorts",
     "pubg": "#pubgmobile #pubg #pubgm #pubgshorts #shorts",
+    "gta": "#gta6 #gtavi #gta #grandtheftauto #gta6gameplay #shorts",
     "movie": "#фильм #кино #моменты #shorts",
     "auto": "#shorts #viral",
 }
@@ -435,6 +511,7 @@ def publish_text(clip: dict, segments, content: str, lang: str = "ru", must_tags
 def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
     tags = _BASE_TAGS.get(content, _BASE_TAGS["auto"])
     fallback_title = clip.get("title") or {"mlbb": "Этот момент в MLBB 🔥", "pubg": "Жёсткий момент в PUBG Mobile",
+                                           "gta": "Этот момент в GTA 6 🔥",
                                            "movie": "Лучший момент фильма"}.get(content, "Смотри до конца 👀")
     base = {"title": fallback_title[:90],
             "desc": f"{_TYPE_WORD.get(clip.get('type'), 'лучший момент').capitalize()}. "
@@ -459,6 +536,14 @@ def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
         log.warning("publish_text failed: %s", e)
         return base
 
+
+
+_VISION_ASK = {
+    "gta": """Для каждого кадра определи, есть ли на экране яркое событие: надпись WASTED/ПОТРАЧЕНО, BUSTED/АРЕСТОВАН,
+MISSION PASSED/МИССИЯ ВЫПОЛНЕНА, большой взрыв, авария на скорости, перестрелка, 4–5 звёзд розыска.
+Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"WASTED","w":6}}]}} — только кадры с событием;
+w: 3 погоня/перестрелка, 4 взрыв/авария, 5 busted, 6 wasted/mission passed.""",
+}
 
 
 def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
@@ -487,8 +572,10 @@ def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
                                                     "data": base64.b64encode(img).decode()}}]
     if not blocks:
         return []
-    game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile"}.get(content, content)
-    blocks.append({"type": "text", "text": f"""Это кадры геймплея {game}.
+    game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile",
+            "gta": "GTA 6 (Grand Theft Auto VI)"}.get(content, content)
+    ask = _VISION_ASK.get(content)
+    blocks.append({"type": "text", "text": f"Это кадры геймплея {game}.\n" + ask.format() if ask else f"""Это кадры геймплея {game}.
 Для каждого кадра определи, есть ли на экране баннер/надпись убийства (в MLBB: «Убил», Double/Triple Kill,
 Maniac, Savage, Wiped Out, Shut Down; в PUBG: «вы убили/нокаут», kill feed с вашим ником).
 Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"SAVAGE","w":10}}]}} — только кадры с убийством;

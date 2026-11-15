@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, pipeline
+from . import ai, chat, fx, live, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -36,6 +36,7 @@ router = Router()
 queue: asyncio.Queue = asyncio.Queue()
 STATE = {"busy": False, "cancel": False, "job": None, "last": time.time(), "warned": False}
 SESSIONS: dict[str, dict] = {}
+LIVE: dict = {}  # текущий эфир (один за раз): proc, dir, uid, chat, st, status_id, sent, chunks…
 
 # ---------- Настройки ----------
 
@@ -48,7 +49,8 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
-    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
+    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg"),
+                ("🚗 GTA 6", "gta")],
     "pick": [("🔥 Лучшие", "best"), ("📼 По порядку", "seq"), ("🏆 Топ-5", "top")],
     "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("Авто", "auto"), ("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
@@ -70,7 +72,8 @@ OPTIONS = {
     "teaser": [("Авто (игры)", "auto"), ("🎯 Всегда", "on"), ("Выкл", "off")],
     "pbar": [("Авто (игры)", "auto"), ("▬ Всегда", "on"), ("Выкл", "off")],
     "loop": [("Авто (игры)", "auto"), ("🔁 Всегда", "on"), ("Выкл", "off")],
-    "censor": [("Без цензуры", "off"), ("🤐 Запикивать мат", "on")],
+    "censor": [("Без цензуры", "off"), ("🤐 Запикивать мат", "on"),
+               ("📖 Литературные субтитры", "soft")],
     "sub_anim": [("💥 Выпрыгивают", "pop"), ("Без анимации", "none")],
     "vision": [("👁 ИИ видит килы", "on"), ("Выкл", "off")],
     "autostop": [("Выкл", 0), ("15 мин", 15), ("30 мин", 30), ("60 мин", 60)],
@@ -101,6 +104,9 @@ PRESETS = {
     "pubg": ("🔫 PUBG-стрим", {"content": "pubg", "pick": "best", "length": "auto", "mode": "game",
                                "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
                                "jumpcut": "auto", "teaser": "on", "director": "on"}),
+    "gta": ("🚗 GTA 6-стрим", {"content": "gta", "pick": "best", "length": "auto", "mode": "game",
+                              "title": "hook", "sub_words": "3", "sub_pos": "bottom", "fx": "auto",
+                              "jumpcut": "auto", "teaser": "on", "director": "on"}),
     "movie": ("🎥 Фильм", {"content": "movie", "pick": "best", "length": "long", "mode": "auto",
                           "title": "hook", "sub_words": "3", "fx": "off", "jumpcut": "off",
                           "teaser": "off"}),
@@ -282,6 +288,13 @@ CAMPS_HELP = ("💰 <b>Кампании</b> — условия блогеров,
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
+        if not cfg.ALLOWED_USERS and not cfg.PUBLIC_BOT:
+            # список не задан — бот закрыт для всех, иначе любой тратил бы ключ Claude и время пода
+            if isinstance(event, Message) and user:
+                await event.answer(
+                    f"🔒 Бот ещё не настроен. Твой ID: <code>{user.id}</code>\n"
+                    f"Впиши его в файл .env: <code>ALLOWED_USERS={user.id}</code> и перезапусти бота.")
+            return
         if cfg.ALLOWED_USERS and user and user.id not in cfg.ALLOWED_USERS:
             if isinstance(event, Message):
                 await event.answer(f"⛔ Нет доступа. Ваш ID: <code>{user.id}</code>")
@@ -295,9 +308,10 @@ class AccessMiddleware(BaseMiddleware):
 HELP = (
     "🎬 <b>Нарезка видео в Shorts</b>\n\n"
     "Пришли видеофайл (до 2 ГБ) или ссылку. В подписи можно указать:\n"
-    "• <code>mlbb 2</code>, <code>pubg</code>, <code>фильм 5</code> — тип видео и число клипов\n"
+    "• <code>mlbb 2</code>, <code>pubg</code>, <code>gta</code>, <code>фильм 5</code> — тип видео и число клипов\n"
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
+    "🔴 <code>/live ссылка gta</code> — резать прямой эфир, пока он идёт · /stoplive — остановить\n\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
@@ -549,6 +563,9 @@ def parse_overrides(text: str) -> dict:
         over["content"] = "mlbb"
     elif re.search(r"pubg|пабг|пубг", t):
         over["content"] = "pubg"
+    elif re.search(r"\bgta|\bгта|grand theft", t):
+        over["content"] = "gta"
+        t = re.sub(r"(gta|гта)\s*(6|vi)\b", " ", t)  # «gta 6» — это не «6 клипов»
     elif re.search(r"фильм|кино|movie|film|сериал", t):
         over["content"] = "movie"
     if re.search(r"\bтоп\b|\btop\b|подборк", t):
@@ -610,6 +627,150 @@ async def on_file(m: Message):
                               "Скачай видео в 480p/720p или обрежь до нужного куска и пришли снова.")
     await enqueue(m, {"type": "new", "src": "file", "file_id": f.file_id, "label": "видеофайл",
                       "over": parse_overrides(m.caption or "")})
+
+
+# ---------- Прямой эфир ----------
+
+@router.message(Command("live"))
+async def live_start(m: Message, bot: Bot):
+    text = m.text or ""
+    um = URL_RE.search(text)
+    if not um:
+        return await m.answer("Пришли так: <code>/live ссылка gta</code>\n"
+                              "Ссылка — на идущий эфир (Twitch, YouTube, Kick…). Тип: gta, mlbb, pubg.\n"
+                              f"Клипы приходят через ~{live.CHUNK // 60} мин после момента. "
+                              f"Эфир сам остановится через {live.MAX_HOURS} ч. Остановить: /stoplive")
+    if LIVE:
+        return await m.answer("Один эфир уже режется. Сначала /stoplive.")
+    url = um.group(0)
+    over = parse_overrides(text.replace("/live", " "))
+    over.pop("clips", None)
+    status = await m.answer("🔴 Подключаюсь к эфиру…")
+    try:
+        src = await asyncio.to_thread(live.resolve, url)
+    except Exception as e:
+        return await status.edit_text(f"❌ {html.escape(str(e)[:300])}")
+    st = {**get_settings(m.from_user.id), **over, "_uid": m.from_user.id, "pick": "best", "ranges": None,
+          "confirm": "off", "review": "off", "vision_k": live.VISION_FRAMES}
+    d = cfg.DATA_DIR / "live" / uuid.uuid4().hex[:8]
+    proc = live.start(src["inputs"], d, limit=live.MAX_HOURS * 3600)
+    LIVE.update(proc=proc, dir=d, uid=m.from_user.id, chat=m.chat.id, st=st, status_id=status.message_id,
+                sent=0, chunks=0, skipped=0, done=set(), tail=None, started=time.time(), url=url,
+                channel=src["channel"])
+    tw = chat.channel_from_url(url)
+    if tw:  # чат Twitch: всплеск сообщений — сигнал яркого момента
+        LIVE["tw"] = chat.TwitchChat(tw).start()
+    asyncio.create_task(live_loop(bot))
+    await status.edit_text(f"🔴 Режу эфир{' ' + html.escape(src['channel']) if src['channel'] else ''}: "
+                           f"{_label('content', st.get('content', 'auto'))}.\n"
+                           f"Первый клип — через ~{live.CHUNK // 60 + 1} мин, если будет яркий момент. /stoplive — стоп"
+                           + ("\n💬 Слежу за чатом." if tw else "")
+                           + ("\n🪶 Лёгкий режим (без видеокарты): обрабатываю только всплески." if live.light() else ""))
+
+
+@router.message(Command("stoplive"))
+async def live_stop(m: Message):
+    if not LIVE:
+        return await m.answer("Эфир сейчас не режется.")
+    LIVE["stop"] = True
+    try:
+        LIVE["proc"].terminate()
+    except Exception:
+        pass
+    await m.answer("⏹ Останавливаю запись. Дорежу то, что уже записано.")
+
+
+async def live_loop(bot: Bot):
+    """Следит за записью: каждый дописанный кусок отправляет в общую очередь монтажа."""
+    L = LIVE
+    try:
+        while True:
+            await asyncio.sleep(5)
+            finished = L["proc"].poll() is not None
+            ready = live.ready_chunks(L["dir"], L["done"], finished)
+            for p in ready:
+                L["done"].add(p.name)
+                pending = sum(1 for j in list(queue._queue) if j.get("type") == "live")
+                if pending >= live.MAX_BACKLOG:  # монтаж не успевает за эфиром — не копим отставание
+                    L["skipped"] += 1
+                    p.unlink(missing_ok=True)
+                    continue
+                L["chunks"] += 1
+                await queue.put({"type": "live", "chunk": p, "n": L["chunks"], "wall_end": p.stat().st_mtime,
+                                 "chat_id": L["chat"],
+                                 "uid": L["uid"], "status_id": L["status_id"], "label": "эфир"})
+            if finished and not ready:
+                break
+        await queue.join()
+        why = "остановлен" if L.get("stop") else (
+            f"достиг лимита {live.MAX_HOURS} ч" if time.time() - L["started"] >= live.MAX_HOURS * 3600 - 30
+            else "закончился")
+        skipped = f" Пропущено кусков из-за отставания: {L['skipped']}." if L["skipped"] else ""
+        await bot.send_message(L["chat"], f"⏹ Эфир {why}. Клипов отправлено: {L['sent']} "
+                                          f"за {int((time.time() - L['started']) / 60)} мин.{skipped}")
+    except Exception:
+        log.exception("live loop failed")
+    finally:
+        try:
+            L["proc"].terminate()
+        except Exception:
+            pass
+        if L.get("tw"):
+            L["tw"].stop()
+        shutil.rmtree(L["dir"], ignore_errors=True)
+        LIVE.clear()
+
+
+async def _do_live(bot, job, workdir, progress, on_clip_factory, set_status, cancelled):
+    """Один кусок эфира: анализ → только яркие моменты → монтаж → отправка."""
+    L, chunk = LIVE, job["chunk"]
+    if not L or not chunk.exists():
+        return
+    st = L["st"]
+    llm = bool(cfg.ANTHROPIC_API_KEY)
+    try:
+        src, overlap = await asyncio.to_thread(live.make_window, chunk, L.get("tail"), workdir)
+        dur = (await asyncio.to_thread(pipeline.media.probe, src))["duration"]
+        mins = int((time.time() - L["started"]) / 60)
+        head = f"🔴 Эфир, {mins} мин · клипов: {L['sent']} · "
+        extra = []
+        if L.get("tw"):  # всплески чата на этом отрезке эфира
+            wall_b = job.get("wall_end") or time.time()
+            extra = L["tw"].events(wall_b - dur, wall_b)
+
+        async def one(source, st_x, shift_overlap):
+            A = await asyncio.to_thread(pipeline.analyze, source, st_x, lambda t: progress(head + t))
+            n = 1 if source != src else live.PER_CHUNK
+            clips = await asyncio.to_thread(pipeline.choose, A, st_x, n)
+            clips = live.worth_it(clips, A["events"], shift_overlap, llm)
+            if (not clips and not llm and st.get("content") not in pipeline.GAMES and source == src
+                    and job["n"] % 3 == 0):
+                # не игра и нет ключа ИИ — оценить момент нечем: шлём лучший раз в три куска
+                clips = (await asyncio.to_thread(pipeline.choose, A, st_x, 1))[:1]
+            for c in clips:
+                c["text"] = "эфир"
+            if clips:
+                res = await asyncio.to_thread(pipeline.render, source, workdir, st_x, A, clips,
+                                              lambda t: progress(head + t), on_clip_factory(st_x, A), cancelled)
+                L["sent"] += len(res)
+
+        if live.light():
+            # без видеокарты: распознаём речь и монтируем только вокруг всплесков чата и громкости
+            loud = await asyncio.to_thread(live.loud_events, src)
+            for k, ev in enumerate(live.candidates(extra + loud, overlap, dur)):
+                win, a = await asyncio.to_thread(live.cut_window, src, ev["t"], dur, workdir / f"cand{k}.mp4")
+                near = [{**e, "t": e["t"] - a} for e in extra + loud if a <= e["t"] <= a + live.PRE + live.POST]
+                await one(win, {**st, "_extra_events": near}, 0.0)
+        else:
+            await one(src, {**st, "_extra_events": extra}, overlap)
+        await set_status(f"🔴 Эфир идёт, {mins} мин · клипов: {L['sent']} · жду следующий момент… /stoplive",
+                         force=True)
+    finally:
+        tail = L["dir"] / "tail.ts" if L else None
+        if tail is not None:
+            await asyncio.to_thread(live.save_tail, chunk, tail)
+            L["tail"] = tail
+        chunk.unlink(missing_ok=True)
 
 
 @router.message(F.text.regexp(URL_RE))
@@ -752,6 +913,9 @@ async def autostop(bot: Bot):
     while True:
         await asyncio.sleep(60)
         mins = get_global().get("autostop", 0)
+        if LIVE:
+            STATE["last"] = time.time()
+            continue
         if not mins or STATE["busy"] or not queue.empty() or not os.getenv("RUNPOD_POD_ID"):
             continue
         idle = (time.time() - STATE["last"]) / 60
@@ -791,7 +955,13 @@ def ytdl(url: str, outdir: Path) -> Path:
         opts["cookiefile"] = cfg.YTDLP_COOKIES
     try:
         with YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+            if info.get("is_live"):
+                raise RuntimeError("Это прямой эфир — он качался бы до конца стрима. "
+                                   "Чтобы резать эфир на ходу, отправь: /live " + url)
             y.extract_info(url, download=True)
+    except RuntimeError:
+        raise
     except Exception as e:
         if "not a bot" in str(e) or "Sign in" in str(e):
             raise RuntimeError("YouTube не даёт скачать с сервера (просит вход). "
@@ -808,6 +978,7 @@ def fmt(t: float) -> str:
 
 
 TAGS = {"mlbb": "#mlbb #mobilelegends #shorts", "pubg": "#pubgmobile #pubg #shorts",
+        "gta": "#gta6 #gtavi #shorts",
         "movie": "#фильм #кино #shorts", "auto": "#shorts"}
 TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "funny": "😂 Смешной момент"}
 
@@ -822,14 +993,23 @@ def caption_for(r: dict, st: dict, segments, lang) -> str:
         return head + "\n" + (st.get("camp_tags", "") + " " + TAGS.get(r.get("content", "auto"), "#shorts")).strip()
     lang = st["subs"] if st["subs"] in ai.LANG_NAMES else (lang if lang in ai.LANG_NAMES else "ru")
     p = ai.publish_text(r, segments, r.get("content", "auto"), lang, st.get("camp_tags", ""))
-    body = (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
-            f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
-            f"<code>{html.escape(p['desc'])}\n\n{html.escape(p['tags'])}</code>")
     camp = get_camps(st["_uid"]).get(st.get("camp_id", "")) if st.get("_uid") and st.get("camp_id") else None
+    tail = ""
     if camp:
-        body += (f"\n\n💰 {html.escape(camp['name'])}: просмотры в течение {html.escape(camp.get('window') or '—')}, "
-                 f"выплаты — {html.escape(camp.get('contact') or '—')}")
-    return (head + body)[:1024]
+        tail = (f"\n\n💰 {html.escape(camp['name'])}: просмотры в течение {html.escape(camp.get('window') or '—')}, "
+                f"выплаты — {html.escape(camp.get('contact') or '—')}")
+
+    def body(desc):
+        return (f"\n📋 <b>Для публикации</b> (нажми, чтобы скопировать)\nНазвание:\n"
+                f"<code>{html.escape(p['title'])}</code>\nОписание:\n"
+                f"<code>{html.escape(desc)}\n\n{html.escape(p['tags'])}</code>")
+
+    # лимит подписи Telegram — 1024 символа; укорачиваем описание, а не режем готовый HTML
+    desc = p["desc"]
+    while len(head + body(desc) + tail) > 1024 and desc:
+        desc = desc[:max(0, len(desc) - 40)].rstrip()
+    cap = head + body(desc) + tail
+    return cap if len(cap) <= 1024 else head[:1024]
 
 
 async def worker(bot: Bot):
@@ -868,13 +1048,31 @@ async def worker(bot: Bot):
                                  duration=int(r["end"] - r["start"]), supports_streaming=True,
                                  request_timeout=600)
 
+        async def send_clip_safe(r, st, A):
+            """Одна попытка повтора; если клип так и не ушёл — сообщаем и идём дальше."""
+            for attempt in (1, 2):
+                try:
+                    return await send_clip(r, st, A)
+                except Exception as e:
+                    log.warning("send clip %s failed (try %d): %s", r.get("index"), attempt, e)
+                    err = e
+                    await asyncio.sleep(3)
+            try:
+                await bot.send_message(chat, f"⚠️ Клип {r.get('index')} не отправился "
+                                             f"({html.escape(str(err)[:150])}). Продолжаю остальные.")
+            except Exception:
+                pass
+
         def on_clip_factory(st, A):
             def on_clip(r):
-                asyncio.run_coroutine_threadsafe(send_clip(r, st, A), loop).result()
+                asyncio.run_coroutine_threadsafe(send_clip_safe(r, st, A), loop).result()
             return on_clip
 
         try:
-            if job["type"] == "new":
+            if job["type"] == "live":
+                workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
+                await _do_live(bot, job, workdir, progress, on_clip_factory, set_status, cancelled)
+            elif job["type"] == "new":
                 workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
                 workdir.mkdir(parents=True, exist_ok=True)
                 await set_status("⬇️ Скачиваю видео…", force=True)

@@ -9,11 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .media import H, W, run
+from .media import H, W, run, venc
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
 FPS_SAMPLE = 5          # анализ кадров в секунду
 AW = 480                # ширина кадра для анализа
+MAX_KEYS = 60           # максимум точек движения камеры на один план
 
 _yunet = None
 _anime = None
@@ -210,10 +211,12 @@ def _x_expr(keys) -> str:
     keys = [(round(t, 2), int(x) // 2 * 2) for t, x in keys]
     if len(keys) == 1:
         return str(keys[0][1])
-    # прореживаем: ключ каждые ~0.4 с
+    # прореживаем: ключ каждые ~0.4 с, но не больше MAX_KEYS на план —
+    # на длинном плане (40+ с) ffmpeg не переваривает слишком вложенное выражение
+    gap = max(0.4, (keys[-1][0] - keys[0][0]) / MAX_KEYS)
     thin = [keys[0]]
     for t, x in keys[1:]:
-        if t - thin[-1][0] >= 0.4:
+        if t - thin[-1][0] >= gap:
             thin.append((t, x))
     if thin[-1] != keys[-1]:
         thin.append(keys[-1])
@@ -249,7 +252,7 @@ def render(clip: Path, out: Path, ass_name: str, shots: list[dict], src_w: int, 
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
         "-map", "[v]", "-map", "0:a:0?", "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+        *venc(),
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)
 
@@ -274,6 +277,6 @@ def render_game(clip: Path, out: Path, ass_name: str, src_w: int, src_h: int):
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
         "-map", "[v]", "-map", "0:a:0?", "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        *venc(),
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name,
     ], cwd=cwd)

@@ -14,7 +14,7 @@ from . import config as cfg
 log = logging.getLogger(__name__)
 
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
-AUTO_LEN = {"mlbb": "short", "pubg": "short", "movie": "long"}  # игры 15–30 с — норма для Shorts
+AUTO_LEN = {"mlbb": "short", "pubg": "short", "gta": "mid", "movie": "long"}  # игры 15–30 с — норма для Shorts
 
 
 def lengths_for(st):
@@ -26,7 +26,7 @@ def lengths_for(st):
     if need > lmin:
         lmin, lmax = need, max(lmax, need + 10)
     return lmin, lmax
-GAMES = ("mlbb", "pubg")
+GAMES = ("mlbb", "pubg", "gta")
 
 
 class Cancelled(Exception):
@@ -44,7 +44,8 @@ def style_of(st: dict, lay: dict | None = None) -> dict:
     style = {"color": st.get("sub_color", "yellow"), "size": st.get("sub_size", "m"),
              "pos": st.get("sub_pos", "bottom"), "title": t if t in ("on", "off", "hook") else "hook",
              "mark": st.get("mark", ""), "words": 1 if one else 3,
-             "censor": st.get("censor", "off") == "on", "anim": st.get("sub_anim", "pop"),
+             "censor": st.get("censor", "off") == "on",
+             "soften": st.get("censor", "off") == "soft", "anim": st.get("sub_anim", "pop"),
              "camp": st.get("camp_label", "")}
     if lay and lay.get("layout") == "stream":   # камера сверху, полоса с ником, геймплей
         top = lay["cam_h"] + lay["bar_h"]
@@ -79,11 +80,12 @@ def analyze(src: Path, st: dict, progress) -> dict:
         progress("⚡ Ищу экшен: движение, вспышки, килл-моменты…")
         motion = media.motion_per_sec(src)
     events = ai.game_events(segments, content) if content != "auto" else []
+    events = events + list(st.get("_extra_events") or [])  # сигналы эфира: всплески чата и громкости
     score = ai.activity(dur, loud, motion, events)
     if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
         progress("👁 ИИ ищет килы на экране…")
         try:
-            vis = ai.vision_events(src, score, content)
+            vis = ai.vision_events(src, score, content, int(st.get("vision_k") or 36))
             if vis:
                 events = events + vis
                 score = ai.activity(dur, loud, motion, events)
@@ -175,18 +177,24 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
         d = workdir / f"clip_{int(c['start'])}_{int(c['end'])}"
         d.mkdir(exist_ok=True)
         raw = d / "raw.mp4"
-        media.extract(src, c["start"], c["end"], raw)
         seg_src, c = segments, dict(c)
         keep = _keep_intervals(c, segments, st, info)
-        if keep:
-            progress(f"✂️ Убираю паузы {i}/{len(clips)}…")
+        if keep:  # паузы вырезаются сразу при вырезке клипа — одним проходом
             try:
-                cut = d / "cut.mp4"
-                media.jumpcut(raw, keep, cut)
-                cut.replace(raw)
+                media.extract(src, c["start"], c["end"], raw, keep=keep, audio=info["audio"])
                 seg_src, c = _remap(c, segments, keep)
             except Exception as e:
                 log.warning("jumpcut failed: %s", e)
+                keep = None
+        if not keep:
+            media.extract(src, c["start"], c["end"], raw)
+        # какие проходы впереди: «для публикации» сжимаем только в последнем из них
+        fx_mode = st.get("fx", "auto")
+        will_fx = bool(c.get("fx_t")) and (fx_mode == "on" or (fx_mode == "auto" and content in GAMES))
+        t_at = _teaser_at(c, st, info)
+        want_loop = st.get("loop", "auto") == "on" or (st.get("loop", "auto") == "auto" and content in GAMES)
+        want_pbar = st.get("pbar", "auto") == "on" or (st.get("pbar", "auto") == "auto" and content in GAMES)
+        will_tail = t_at is not None or want_loop or want_pbar
 
         seg_in = [s for s in seg_src if s["e"] > c["start"] and s["s"] < c["end"]]
         word_level = True
@@ -212,12 +220,17 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
                        style=style_of(st, lay), labels=c.get("labels"))
         local_cuts = c.get("cuts") or ([] if "orig_start" in c else
                                        [x - c["start"] for x in cuts if c["start"] < x < c["end"]])
+        media.FINAL.set(not (will_fx or will_tail))
         out = _frame(raw, d, local_cuts, c["end"] - c["start"], info, st, lay)
+        is_final = media.FINAL.get()  # сжат ли текущий файл уже «для публикации»
+        media.FINAL.set(not will_tail)
         if inserts:
             mixed = d / "mixed.mp4"
             review.mix(out, inserts, mixed)
             out = mixed
         out = _finish(out, d, c, st, info, progress, i, len(clips))
+        if (d / "fx.mp4").exists():
+            is_final = not will_tail
         if st.get("censor") == "on" and info["audio"]:
             bad = [(w["s"] - c["start"], w["e"] - c["start"]) for sg in seg_in for w in sg.get("words", [])
                    if subs.SWEAR.search(w["w"])] if word_level else []
@@ -228,24 +241,25 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
                     out = bp
                 except Exception as e:
                     log.warning("beep failed: %s", e)
-        out = _teaser(out, d, c, st, info)
-        if st.get("loop", "auto") == "on" or (st.get("loop", "auto") == "auto" and st.get("content") in GAMES):
+        media.FINAL.set(True)
+        if will_tail:  # тизер + петля + полоска — одним проходом; если не вышло — по шагам, как раньше
+            before = out
             try:
-                lp = d / "loop.mp4"
-                media.loopify(out, lp)
-                out = lp
+                tl = d / "tail.mp4"
+                if media.tail(out, tl, teaser_at=None if t_at is None else t_at + 0.3, loop=want_loop,
+                              pbar=want_pbar, has_audio=info["audio"]):
+                    out = tl
             except Exception as e:
-                log.warning("loop failed: %s", e)
-        if st.get("pbar", "auto") == "on" or (st.get("pbar", "auto") == "auto" and st.get("content") in GAMES):
-            try:
-                pb = d / "pbar.mp4"
-                media.progress_bar(out, pb, media.probe(out)["duration"])
-                out = pb
-            except Exception as e:
-                log.warning("progress bar failed: %s", e)
+                log.warning("tail pass failed, falling back to steps: %s", e)
+                out = _tail_steps(out, d, t_at, want_loop, want_pbar)
+            is_final = is_final or out != before
+        if not is_final:  # последний запланированный проход не состоялся — сжимаем для публикации
+            media.to_delivery(out)
         final = d / f"short_{i}.mp4"
         out.replace(final)
-        raw.unlink(missing_ok=True)
+        for p in d.iterdir():  # промежуточные рендеры (framed, fx, teaser…) больше не нужны
+            if p != final and p.is_file():
+                p.unlink(missing_ok=True)
         r = {"path": final, "title": c.get("title", ""), "start": c.get("orig_start", c["start"]),
              "end": c.get("orig_end", c["end"]),
              "type": c.get("type", ""), "content": content, "index": i, "total": len(clips),
@@ -311,24 +325,36 @@ def _remap(c, segments, keep):
     return segs, c2
 
 
-def _teaser(out, d, c, st, info):
+def _teaser_at(c, st, info):
+    """Момент для тизера в начале (с от начала клипа) или None, если тизер не нужен."""
     mode = st.get("teaser", "auto")
     if mode == "off" or not info["audio"] or c.get("labels"):
-        return out
+        return None
     if mode == "auto" and st.get("content") not in GAMES:
-        return out
+        return None
     t = max(c.get("fx_t") or [0.0], default=0.0)
     if c.get("fx_t"):
         t = c["fx_t"][-1] if c.get("fx_big", 0) < 6 else c["fx_t"][0]
-    if t < 4.0:  # яркий момент и так в начале
-        return out
-    try:
-        dst = d / "teaser.mp4"
-        media.teaser(out, t + 0.3, dst)
-        return dst
-    except Exception as e:
-        log.warning("teaser failed: %s", e)
-        return out
+    return None if t < 4.0 else t  # яркий момент и так в начале
+
+
+def _tail_steps(out, d, t_at, want_loop, want_pbar):
+    """Запасной путь: тизер, петля и полоска отдельными проходами."""
+    steps = []
+    if t_at is not None:
+        steps.append(("teaser", lambda s, o: media.teaser(s, t_at + 0.3, o)))
+    if want_loop:
+        steps.append(("loop", media.loopify))
+    if want_pbar:
+        steps.append(("pbar", lambda s, o: media.progress_bar(s, o, media.probe(s)["duration"])))
+    for name, fn in steps:
+        try:
+            dst = d / f"{name}.mp4"
+            fn(out, dst)
+            out = dst
+        except Exception as e:
+            log.warning("%s failed: %s", name, e)
+    return out
 
 
 def _game_layout(raw, c, info, st):
@@ -387,11 +413,31 @@ def _finish(out, d, c, st, info, progress, i, total):
 
 # ---------- Топ-5 ----------
 
+TOP_MAX = 58.0  # вся подборка — до минуты
+
+
+def _fit_total(parts: list[dict], total: float, min_len: float = 5.0) -> list[dict]:
+    """Если подборка длиннее total — укорачиваем куски с начала (развязка в конце остаётся)."""
+    lens = [c["end"] - c["start"] for c in parts]
+    extra = sum(lens) - total
+    spare = sum(max(0.0, x - min_len) for x in lens)
+    if extra <= 0 or spare <= 0:
+        return parts
+    k = min(1.0, extra / spare)
+    for c, L in zip(parts, lens):
+        cut = max(0.0, L - min_len) * k
+        c["start"] += cut
+        if c.get("fx_t"):
+            c["fx_t"] = [t - cut for t in c["fx_t"] if t - cut >= 0]
+    return parts
+
+
 def compile_top(src: Path, workdir: Path, st: dict, A: dict, progress, k=5, piece=(6, 22)):
     """Один шортс из k лучших моментов: #5 … #1 (лучший в конце)."""
     parts = choose(A, {**st, "ranges": None, "pick": "best"}, k, lengths=piece)
     if not parts:
         raise RuntimeError("Не нашёл ярких моментов для подборки")
+    parts = _fit_total([dict(c) for c in parts], TOP_MAX)
     parts.sort(key=lambda c: c.get("score", 0))  # слабый первым, лучший — последним
     d = workdir / "top"
     d.mkdir(exist_ok=True)
