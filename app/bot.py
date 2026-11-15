@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, live, pipeline
+from . import ai, chat, fx, live, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -657,10 +657,15 @@ async def live_start(m: Message, bot: Bot):
     LIVE.update(proc=proc, dir=d, uid=m.from_user.id, chat=m.chat.id, st=st, status_id=status.message_id,
                 sent=0, chunks=0, skipped=0, done=set(), tail=None, started=time.time(), url=url,
                 channel=src["channel"])
+    tw = chat.channel_from_url(url)
+    if tw:  # чат Twitch: всплеск сообщений — сигнал яркого момента
+        LIVE["tw"] = chat.TwitchChat(tw).start()
     asyncio.create_task(live_loop(bot))
     await status.edit_text(f"🔴 Режу эфир{' ' + html.escape(src['channel']) if src['channel'] else ''}: "
                            f"{_label('content', st.get('content', 'auto'))}.\n"
-                           f"Первый клип — через ~{live.CHUNK // 60 + 1} мин, если будет яркий момент. /stoplive — стоп")
+                           f"Первый клип — через ~{live.CHUNK // 60 + 1} мин, если будет яркий момент. /stoplive — стоп"
+                           + ("\n💬 Слежу за чатом." if tw else "")
+                           + ("\n🪶 Лёгкий режим (без видеокарты): обрабатываю только всплески." if live.light() else ""))
 
 
 @router.message(Command("stoplive"))
@@ -691,7 +696,8 @@ async def live_loop(bot: Bot):
                     p.unlink(missing_ok=True)
                     continue
                 L["chunks"] += 1
-                await queue.put({"type": "live", "chunk": p, "n": L["chunks"], "chat_id": L["chat"],
+                await queue.put({"type": "live", "chunk": p, "n": L["chunks"], "wall_end": p.stat().st_mtime,
+                                 "chat_id": L["chat"],
                                  "uid": L["uid"], "status_id": L["status_id"], "label": "эфир"})
             if finished and not ready:
                 break
@@ -709,6 +715,8 @@ async def live_loop(bot: Bot):
             L["proc"].terminate()
         except Exception:
             pass
+        if L.get("tw"):
+            L["tw"].stop()
         shutil.rmtree(L["dir"], ignore_errors=True)
         LIVE.clear()
 
@@ -719,23 +727,42 @@ async def _do_live(bot, job, workdir, progress, on_clip_factory, set_status, can
     if not L or not chunk.exists():
         return
     st = L["st"]
+    llm = bool(cfg.ANTHROPIC_API_KEY)
     try:
         src, overlap = await asyncio.to_thread(live.make_window, chunk, L.get("tail"), workdir)
+        dur = (await asyncio.to_thread(pipeline.media.probe, src))["duration"]
         mins = int((time.time() - L["started"]) / 60)
         head = f"🔴 Эфир, {mins} мин · клипов: {L['sent']} · "
-        A = await asyncio.to_thread(pipeline.analyze, src, st, lambda t: progress(head + t))
-        clips = await asyncio.to_thread(pipeline.choose, A, st, live.PER_CHUNK)
-        clips = live.worth_it(clips, A["events"], overlap, bool(cfg.ANTHROPIC_API_KEY))
-        if (not clips and not cfg.ANTHROPIC_API_KEY and st.get("content") not in pipeline.GAMES
-                and job["n"] % 3 == 0):
-            # не игра и нет ключа ИИ — оценить момент нечем: шлём лучший раз в три куска
-            clips = (await asyncio.to_thread(pipeline.choose, A, st, 1))[:1]
-        for c in clips:
-            c["text"] = "эфир"
-        if clips:
-            res = await asyncio.to_thread(pipeline.render, src, workdir, st, A, clips,
-                                          lambda t: progress(head + t), on_clip_factory(st, A), cancelled)
-            L["sent"] += len(res)
+        extra = []
+        if L.get("tw"):  # всплески чата на этом отрезке эфира
+            wall_b = job.get("wall_end") or time.time()
+            extra = L["tw"].events(wall_b - dur, wall_b)
+
+        async def one(source, st_x, shift_overlap):
+            A = await asyncio.to_thread(pipeline.analyze, source, st_x, lambda t: progress(head + t))
+            n = 1 if source != src else live.PER_CHUNK
+            clips = await asyncio.to_thread(pipeline.choose, A, st_x, n)
+            clips = live.worth_it(clips, A["events"], shift_overlap, llm)
+            if (not clips and not llm and st.get("content") not in pipeline.GAMES and source == src
+                    and job["n"] % 3 == 0):
+                # не игра и нет ключа ИИ — оценить момент нечем: шлём лучший раз в три куска
+                clips = (await asyncio.to_thread(pipeline.choose, A, st_x, 1))[:1]
+            for c in clips:
+                c["text"] = "эфир"
+            if clips:
+                res = await asyncio.to_thread(pipeline.render, source, workdir, st_x, A, clips,
+                                              lambda t: progress(head + t), on_clip_factory(st_x, A), cancelled)
+                L["sent"] += len(res)
+
+        if live.light():
+            # без видеокарты: распознаём речь и монтируем только вокруг всплесков чата и громкости
+            loud = await asyncio.to_thread(live.loud_events, src)
+            for k, ev in enumerate(live.candidates(extra + loud, overlap, dur)):
+                win, a = await asyncio.to_thread(live.cut_window, src, ev["t"], dur, workdir / f"cand{k}.mp4")
+                near = [{**e, "t": e["t"] - a} for e in extra + loud if a <= e["t"] <= a + live.PRE + live.POST]
+                await one(win, {**st, "_extra_events": near}, 0.0)
+        else:
+            await one(src, {**st, "_extra_events": extra}, overlap)
         await set_status(f"🔴 Эфир идёт, {mins} мин · клипов: {L['sent']} · жду следующий момент… /stoplive",
                          force=True)
     finally:

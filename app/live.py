@@ -4,6 +4,7 @@
 Каждый готовый кусок проходит обычный конвейер; чтобы момент на стыке кусков не потерялся,
 к куску приклеивается хвост предыдущего.
 """
+import os
 import subprocess
 from pathlib import Path
 
@@ -14,6 +15,8 @@ OVERLAP = 20                                  # хвост прошлого ку
 MAX_HOURS = cfg._int("LIVE_MAX_HOURS", 3)     # страховка: эфир сам остановится, чтобы не сжечь баланс
 MAX_BACKLOG = 3                               # если монтаж не успевает — старые куски пропускаются
 PER_CHUNK = 2                                 # максимум клипов с одного куска
+MODE = os.getenv("LIVE_MODE", "auto").lower()   # auto | full | light
+PRE, POST = 28, 14                            # лёгкий режим: окно вокруг момента, с
 VISION_FRAMES = 12                            # кадров на кусок для ИИ (в обычном режиме 36 на всё видео)
 
 
@@ -101,3 +104,51 @@ def worth_it(clips: list[dict], events: list[dict], overlap: float, used_llm: bo
         if strong or (used_llm and c.get("score", 0) >= 7):
             out.append(c)
     return out[:PER_CHUNK]
+
+
+def light() -> bool:
+    """Лёгкий режим — для сервера без видеокарты: сначала дешёвый поиск всплесков (чат, громкость),
+    и только вокруг них — распознавание речи и монтаж. Тихие куски не обрабатываются вовсе."""
+    return MODE == "light" or (MODE == "auto" and cfg.WHISPER_DEVICE == "cpu")
+
+
+def loud_events(src: Path) -> list[dict]:
+    """Резкие всплески громкости (крик, взрыв) — дёшево, без распознавания речи."""
+    import numpy as np
+
+    from .media import loudness_per_sec
+
+    loud = loudness_per_sec(src)
+    if len(loud) < 20:
+        return []
+    sm = np.convolve(loud, np.ones(3) / 3, mode="same")
+    base = float(np.median(sm))
+    out = []
+    for i in np.argsort(sm)[::-1][:40]:
+        if sm[i] < base + 8 or sm[i] < -30:  # заметно громче обычного и не тишина
+            break
+        if all(abs(int(i) - e["t"]) >= 25 for e in out):
+            out.append({"t": float(i), "w": 3.0, "kind": "funny", "label": "громкий момент"})
+    return out
+
+
+def candidates(events: list[dict], overlap: float, dur: float) -> list[dict]:
+    """Моменты, ради которых стоит обрабатывать кусок. Момент у самого конца куска оставляем
+    следующему (там он будет с продолжением), момент в хвосте прошлого куска — уже был."""
+    ok = [e for e in events if e["kind"] != "talk" and e["w"] >= 3 and max(0.0, overlap - 8) <= e["t"] < dur - 8]
+    out = []
+    for e in sorted(ok, key=lambda e: -e["w"]):
+        if all(abs(e["t"] - x["t"]) >= 30 for x in out):
+            out.append(e)
+    return out[:PER_CHUNK]
+
+
+def cut_window(src: Path, t: float, dur: float, dst: Path) -> tuple[Path, float]:
+    """Вырезает окно вокруг момента без перекодирования. Возвращает (файл, начало окна в куске)."""
+    from .media import run
+
+    a = max(0.0, t - PRE)
+    b = min(dur, t + POST)
+    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{a:.2f}", "-i", str(src), "-t", f"{b - a:.2f}",
+         "-c", "copy", "-avoid_negative_ts", "make_zero", str(dst)])
+    return dst, a

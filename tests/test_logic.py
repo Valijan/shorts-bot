@@ -155,6 +155,48 @@ def test_tail_single_pass(tmp=Path("/tmp/shorts_tail")):
     assert abs(media.probe(tmp / "pb.mp4")["duration"] - 12) < 0.2
 
 
+def test_twitch_chat_counts_and_spikes():
+    import socket, threading, time
+    from app import chat
+    assert chat.channel_from_url("https://www.twitch.tv/Oneshotmlbb") == "oneshotmlbb"
+    assert chat.channel_from_url("https://youtube.com/watch?v=1") is None
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    got = {}
+
+    def serve():
+        c, _ = srv.accept()
+        got["hello"] = c.recv(200).decode()
+        c.sendall(b"PING :tmi.twitch.tv\r\n")
+        for i in range(12):
+            c.sendall(f":u{i}!u@u.tmi.twitch.tv PRIVMSG #test :lol {i}\r\n".encode())
+        time.sleep(0.5)
+        got["pong"] = c.recv(200).decode()
+        c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    ch = chat.TwitchChat("Test", host="127.0.0.1", port=srv.getsockname()[1]).start()
+    time.sleep(1.5)
+    ch.stop()
+    assert "JOIN #test" in got["hello"] and "PONG" in got["pong"] and len(ch.times) == 12
+    # тихий чат (1 сообщение в 4 с) и всплеск на 100-й секунде
+    now = time.time()
+    base = [now - 600 + i * 4.0 for i in range(150)]
+    burst = [now - 600 + 100 + i * 0.15 for i in range(30)]
+    ev = chat.spikes(np.array(sorted(base + burst)), now - 600, now - 600 + 180)
+    assert len(ev) == 1 and 92 <= ev[0]["t"] <= 100 and ev[0]["w"] >= 3 and ev[0]["kind"] == "funny", ev
+    assert chat.spikes(np.array(base), now - 600, now - 600 + 180) == []
+
+
+def test_live_light_candidates():
+    from app import live
+    ev = [{"t": 5.0, "w": 5, "kind": "funny", "label": "x"},     # в хвосте прошлого куска — уже был
+          {"t": 60.0, "w": 4, "kind": "funny", "label": "x"}, {"t": 70.0, "w": 6, "kind": "funny", "label": "x"},
+          {"t": 120.0, "w": 2.0, "kind": "talk", "label": "x"},
+          {"t": 196.0, "w": 7, "kind": "funny", "label": "x"}]   # у самого конца — достанется следующему
+    assert [e["t"] for e in live.candidates(ev, 20.0, 200.0)] == [70.0]
+    assert [e["t"] for e in live.candidates(ev, 0.0, 200.0)] == [70.0, 5.0]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

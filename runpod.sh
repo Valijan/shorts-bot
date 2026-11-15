@@ -35,6 +35,9 @@ if [ ! -f .env ]; then
     read -rp "Токен бота (от @BotFather): " T
     read -rp "Твой Telegram ID (без него бот закрыт; узнать — написать боту, он покажет): " U
     read -rp "Ключ Claude API (Enter — пропустить): " K
+    echo "Чтобы принимать файлы до 2 ГБ (а не 20 МБ), нужны два ключа с https://my.telegram.org"
+    read -rp "api_id (Enter — пропустить): " TG_API_ID
+    read -rp "api_hash (Enter — пропустить): " TG_API_HASH
   fi
   cat > .env <<ENV
 BOT_TOKEN=$T
@@ -47,8 +50,15 @@ WHISPER_COMPUTE=float16
 DATA_DIR=/workspace/data
 SHOW_TITLE=1
 WATERMARK=
+TG_API_ID=${TG_API_ID:-}
+TG_API_HASH=${TG_API_HASH:-}
 ENV
 fi
+
+# ключи для файлов до 2 ГБ: из переменных RunPod или из .env (подходят оба названия)
+envval() { grep -oP "^$1=\\K.*" .env 2>/dev/null | tr -d '"'"'"' \r' | head -1; }
+TG_API_ID="${TG_API_ID:-$(envval TG_API_ID)}";     TG_API_ID="${TG_API_ID:-$(envval TELEGRAM_API_ID)}"
+TG_API_HASH="${TG_API_HASH:-$(envval TG_API_HASH)}"; TG_API_HASH="${TG_API_HASH:-$(envval TELEGRAM_API_HASH)}"
 
 # ---- Свой сервер Bot API: файлы до 2 ГБ вместо 20 МБ ----
 # Нужны TG_API_ID и TG_API_HASH (https://my.telegram.org → API development tools)
@@ -75,6 +85,8 @@ if [ -n "${TG_API_ID:-}" ] && [ -n "${TG_API_HASH:-}" ]; then
   grep -q '^BOT_API_URL=' .env 2>/dev/null && sed -i 's|^BOT_API_URL=.*|BOT_API_URL=http://127.0.0.1:18081|' .env \
     || echo "BOT_API_URL=http://127.0.0.1:18081" >> .env
   echo "✅ Свой Bot API запущен — бот принимает файлы до 2 ГБ"
+else
+  echo "ℹ️ Файлы только до 20 МБ. Для 2 ГБ впиши в .env TG_API_ID и TG_API_HASH (my.telegram.org) и запусти скрипт снова."
 fi
 
 pkill -f "python3 -m app.bot" 2>/dev/null || true

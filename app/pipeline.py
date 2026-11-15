@@ -80,6 +80,7 @@ def analyze(src: Path, st: dict, progress) -> dict:
         progress("⚡ Ищу экшен: движение, вспышки, килл-моменты…")
         motion = media.motion_per_sec(src)
     events = ai.game_events(segments, content) if content != "auto" else []
+    events = events + list(st.get("_extra_events") or [])  # сигналы эфира: всплески чата и громкости
     score = ai.activity(dur, loud, motion, events)
     if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
         progress("👁 ИИ ищет килы на экране…")
