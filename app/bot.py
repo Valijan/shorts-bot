@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, pipeline
+from . import ai, fx, live, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -36,6 +36,7 @@ router = Router()
 queue: asyncio.Queue = asyncio.Queue()
 STATE = {"busy": False, "cancel": False, "job": None, "last": time.time(), "warned": False}
 SESSIONS: dict[str, dict] = {}
+LIVE: dict = {}  # текущий эфир (один за раз): proc, dir, uid, chat, st, status_id, sent, chunks…
 
 # ---------- Настройки ----------
 
@@ -48,7 +49,8 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
 GLOBAL_DEFAULTS = {"autostop": 30}
 OPTIONS = {
-    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
+    "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg"),
+                ("🚗 GTA 6", "gta")],
     "pick": [("🔥 Лучшие", "best"), ("📼 По порядку", "seq"), ("🏆 Топ-5", "top")],
     "clips": [("3", 3), ("5", 5), ("10", 10), ("20", 20), ("Все", 0)],
     "length": [("Авто", "auto"), ("15–30с", "short"), ("30–45с", "mid"), ("45–60с", "long")],
@@ -101,6 +103,9 @@ PRESETS = {
     "pubg": ("🔫 PUBG-стрим", {"content": "pubg", "pick": "best", "length": "auto", "mode": "game",
                                "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
                                "jumpcut": "auto", "teaser": "on", "director": "on"}),
+    "gta": ("🚗 GTA 6-стрим", {"content": "gta", "pick": "best", "length": "auto", "mode": "game",
+                              "title": "hook", "sub_words": "3", "sub_pos": "bottom", "fx": "auto",
+                              "jumpcut": "auto", "teaser": "on", "director": "on"}),
     "movie": ("🎥 Фильм", {"content": "movie", "pick": "best", "length": "long", "mode": "auto",
                           "title": "hook", "sub_words": "3", "fx": "off", "jumpcut": "off",
                           "teaser": "off"}),
@@ -302,9 +307,10 @@ class AccessMiddleware(BaseMiddleware):
 HELP = (
     "🎬 <b>Нарезка видео в Shorts</b>\n\n"
     "Пришли видеофайл (до 2 ГБ) или ссылку. В подписи можно указать:\n"
-    "• <code>mlbb 2</code>, <code>pubg</code>, <code>фильм 5</code> — тип видео и число клипов\n"
+    "• <code>mlbb 2</code>, <code>pubg</code>, <code>gta</code>, <code>фильм 5</code> — тип видео и число клипов\n"
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
+    "🔴 <code>/live ссылка gta</code> — резать прямой эфир, пока он идёт · /stoplive — остановить\n\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
@@ -556,6 +562,9 @@ def parse_overrides(text: str) -> dict:
         over["content"] = "mlbb"
     elif re.search(r"pubg|пабг|пубг", t):
         over["content"] = "pubg"
+    elif re.search(r"\bgta|\bгта|grand theft", t):
+        over["content"] = "gta"
+        t = re.sub(r"(gta|гта)\s*(6|vi)\b", " ", t)  # «gta 6» — это не «6 клипов»
     elif re.search(r"фильм|кино|movie|film|сериал", t):
         over["content"] = "movie"
     if re.search(r"\bтоп\b|\btop\b|подборк", t):
@@ -617,6 +626,123 @@ async def on_file(m: Message):
                               "Скачай видео в 480p/720p или обрежь до нужного куска и пришли снова.")
     await enqueue(m, {"type": "new", "src": "file", "file_id": f.file_id, "label": "видеофайл",
                       "over": parse_overrides(m.caption or "")})
+
+
+# ---------- Прямой эфир ----------
+
+@router.message(Command("live"))
+async def live_start(m: Message, bot: Bot):
+    text = m.text or ""
+    um = URL_RE.search(text)
+    if not um:
+        return await m.answer("Пришли так: <code>/live ссылка gta</code>\n"
+                              "Ссылка — на идущий эфир (Twitch, YouTube, Kick…). Тип: gta, mlbb, pubg.\n"
+                              f"Клипы приходят через ~{live.CHUNK // 60} мин после момента. "
+                              f"Эфир сам остановится через {live.MAX_HOURS} ч. Остановить: /stoplive")
+    if LIVE:
+        return await m.answer("Один эфир уже режется. Сначала /stoplive.")
+    url = um.group(0)
+    over = parse_overrides(text.replace("/live", " "))
+    over.pop("clips", None)
+    status = await m.answer("🔴 Подключаюсь к эфиру…")
+    try:
+        src = await asyncio.to_thread(live.resolve, url)
+    except Exception as e:
+        return await status.edit_text(f"❌ {html.escape(str(e)[:300])}")
+    st = {**get_settings(m.from_user.id), **over, "_uid": m.from_user.id, "pick": "best", "ranges": None,
+          "confirm": "off", "review": "off", "vision_k": live.VISION_FRAMES}
+    d = cfg.DATA_DIR / "live" / uuid.uuid4().hex[:8]
+    proc = live.start(src["inputs"], d, limit=live.MAX_HOURS * 3600)
+    LIVE.update(proc=proc, dir=d, uid=m.from_user.id, chat=m.chat.id, st=st, status_id=status.message_id,
+                sent=0, chunks=0, skipped=0, done=set(), tail=None, started=time.time(), url=url,
+                channel=src["channel"])
+    asyncio.create_task(live_loop(bot))
+    await status.edit_text(f"🔴 Режу эфир{' ' + html.escape(src['channel']) if src['channel'] else ''}: "
+                           f"{_label('content', st.get('content', 'auto'))}.\n"
+                           f"Первый клип — через ~{live.CHUNK // 60 + 1} мин, если будет яркий момент. /stoplive — стоп")
+
+
+@router.message(Command("stoplive"))
+async def live_stop(m: Message):
+    if not LIVE:
+        return await m.answer("Эфир сейчас не режется.")
+    LIVE["stop"] = True
+    try:
+        LIVE["proc"].terminate()
+    except Exception:
+        pass
+    await m.answer("⏹ Останавливаю запись. Дорежу то, что уже записано.")
+
+
+async def live_loop(bot: Bot):
+    """Следит за записью: каждый дописанный кусок отправляет в общую очередь монтажа."""
+    L = LIVE
+    try:
+        while True:
+            await asyncio.sleep(5)
+            finished = L["proc"].poll() is not None
+            ready = live.ready_chunks(L["dir"], L["done"], finished)
+            for p in ready:
+                L["done"].add(p.name)
+                pending = sum(1 for j in list(queue._queue) if j.get("type") == "live")
+                if pending >= live.MAX_BACKLOG:  # монтаж не успевает за эфиром — не копим отставание
+                    L["skipped"] += 1
+                    p.unlink(missing_ok=True)
+                    continue
+                L["chunks"] += 1
+                await queue.put({"type": "live", "chunk": p, "n": L["chunks"], "chat_id": L["chat"],
+                                 "uid": L["uid"], "status_id": L["status_id"], "label": "эфир"})
+            if finished and not ready:
+                break
+        await queue.join()
+        why = "остановлен" if L.get("stop") else (
+            f"достиг лимита {live.MAX_HOURS} ч" if time.time() - L["started"] >= live.MAX_HOURS * 3600 - 30
+            else "закончился")
+        skipped = f" Пропущено кусков из-за отставания: {L['skipped']}." if L["skipped"] else ""
+        await bot.send_message(L["chat"], f"⏹ Эфир {why}. Клипов отправлено: {L['sent']} "
+                                          f"за {int((time.time() - L['started']) / 60)} мин.{skipped}")
+    except Exception:
+        log.exception("live loop failed")
+    finally:
+        try:
+            L["proc"].terminate()
+        except Exception:
+            pass
+        shutil.rmtree(L["dir"], ignore_errors=True)
+        LIVE.clear()
+
+
+async def _do_live(bot, job, workdir, progress, on_clip_factory, set_status, cancelled):
+    """Один кусок эфира: анализ → только яркие моменты → монтаж → отправка."""
+    L, chunk = LIVE, job["chunk"]
+    if not L or not chunk.exists():
+        return
+    st = L["st"]
+    try:
+        src, overlap = await asyncio.to_thread(live.make_window, chunk, L.get("tail"), workdir)
+        mins = int((time.time() - L["started"]) / 60)
+        head = f"🔴 Эфир, {mins} мин · клипов: {L['sent']} · "
+        A = await asyncio.to_thread(pipeline.analyze, src, st, lambda t: progress(head + t))
+        clips = await asyncio.to_thread(pipeline.choose, A, st, live.PER_CHUNK)
+        clips = live.worth_it(clips, A["events"], overlap, bool(cfg.ANTHROPIC_API_KEY))
+        if (not clips and not cfg.ANTHROPIC_API_KEY and st.get("content") not in pipeline.GAMES
+                and job["n"] % 3 == 0):
+            # не игра и нет ключа ИИ — оценить момент нечем: шлём лучший раз в три куска
+            clips = (await asyncio.to_thread(pipeline.choose, A, st, 1))[:1]
+        for c in clips:
+            c["text"] = "эфир"
+        if clips:
+            res = await asyncio.to_thread(pipeline.render, src, workdir, st, A, clips,
+                                          lambda t: progress(head + t), on_clip_factory(st, A), cancelled)
+            L["sent"] += len(res)
+        await set_status(f"🔴 Эфир идёт, {mins} мин · клипов: {L['sent']} · жду следующий момент… /stoplive",
+                         force=True)
+    finally:
+        tail = L["dir"] / "tail.ts" if L else None
+        if tail is not None:
+            await asyncio.to_thread(live.save_tail, chunk, tail)
+            L["tail"] = tail
+        chunk.unlink(missing_ok=True)
 
 
 @router.message(F.text.regexp(URL_RE))
@@ -759,6 +885,9 @@ async def autostop(bot: Bot):
     while True:
         await asyncio.sleep(60)
         mins = get_global().get("autostop", 0)
+        if LIVE:
+            STATE["last"] = time.time()
+            continue
         if not mins or STATE["busy"] or not queue.empty() or not os.getenv("RUNPOD_POD_ID"):
             continue
         idle = (time.time() - STATE["last"]) / 60
@@ -798,7 +927,13 @@ def ytdl(url: str, outdir: Path) -> Path:
         opts["cookiefile"] = cfg.YTDLP_COOKIES
     try:
         with YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+            if info.get("is_live"):
+                raise RuntimeError("Это прямой эфир — он качался бы до конца стрима. "
+                                   "Чтобы резать эфир на ходу, отправь: /live " + url)
             y.extract_info(url, download=True)
+    except RuntimeError:
+        raise
     except Exception as e:
         if "not a bot" in str(e) or "Sign in" in str(e):
             raise RuntimeError("YouTube не даёт скачать с сервера (просит вход). "
@@ -815,6 +950,7 @@ def fmt(t: float) -> str:
 
 
 TAGS = {"mlbb": "#mlbb #mobilelegends #shorts", "pubg": "#pubgmobile #pubg #shorts",
+        "gta": "#gta6 #gtavi #shorts",
         "movie": "#фильм #кино #shorts", "auto": "#shorts"}
 TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "funny": "😂 Смешной момент"}
 
@@ -905,7 +1041,10 @@ async def worker(bot: Bot):
             return on_clip
 
         try:
-            if job["type"] == "new":
+            if job["type"] == "live":
+                workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
+                await _do_live(bot, job, workdir, progress, on_clip_factory, set_status, cancelled)
+            elif job["type"] == "new":
                 workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
                 workdir.mkdir(parents=True, exist_ok=True)
                 await set_status("⬇️ Скачиваю видео…", force=True)

@@ -80,7 +80,7 @@ KEYWORDS = re.compile(
     r"kill\w*|хэдшот\w*|хедшот\w*|headshot|клатч|clutch|вайп|ace|эйс|топ|победа|victory|лорд|"
     r"черепах\w*|фанни|fanny|лин|ling|госу|gusion|ланс\w*|lancelot|хаябуса|hayabusa|чоу|chou|"
     r"лейла|layla|мия|miya|алукард|alucard|кагура|kagura|бенедетта|benedetta|джулиан|julian|"
-    r"чикен|chicken|awm|м416|m416|авм|ультa|ульт\w*)$", re.I)
+    r"wasted|потрачено|busted|арестован|копы|погоня|взрыв|чикен|chicken|awm|м416|m416|авм|ультa|ульт\w*)$", re.I)
 SWEAR = re.compile(
     r"(х[уy][йяеёию]|п[иеё]зд|[её]б[аеуиыо]|бля|сук[аи]|муда|пидор|залуп|шлюх|f+u+c+k|shit|bitch)", re.I)
 

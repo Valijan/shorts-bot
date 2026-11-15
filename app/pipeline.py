@@ -14,7 +14,7 @@ from . import config as cfg
 log = logging.getLogger(__name__)
 
 LENGTHS = {"short": (15, 30), "mid": (30, 45), "long": (45, 59)}
-AUTO_LEN = {"mlbb": "short", "pubg": "short", "movie": "long"}  # игры 15–30 с — норма для Shorts
+AUTO_LEN = {"mlbb": "short", "pubg": "short", "gta": "mid", "movie": "long"}  # игры 15–30 с — норма для Shorts
 
 
 def lengths_for(st):
@@ -26,7 +26,7 @@ def lengths_for(st):
     if need > lmin:
         lmin, lmax = need, max(lmax, need + 10)
     return lmin, lmax
-GAMES = ("mlbb", "pubg")
+GAMES = ("mlbb", "pubg", "gta")
 
 
 class Cancelled(Exception):
@@ -83,7 +83,7 @@ def analyze(src: Path, st: dict, progress) -> dict:
     if content in GAMES and _use_llm() and st.get("vision", "on") == "on":
         progress("👁 ИИ ищет килы на экране…")
         try:
-            vis = ai.vision_events(src, score, content)
+            vis = ai.vision_events(src, score, content, int(st.get("vision_k") or 36))
             if vis:
                 events = events + vis
                 score = ai.activity(dur, loud, motion, events)

@@ -19,6 +19,8 @@ VOCAB = {
     "mlbb": "Mobile Legends, MLBB, Savage, Maniac, Triple Kill, Double Kill, Wiped Out, Shut Down, "
             "Лорд, Черепаха, ульта, гэнк, лес, роум, мид, голд, фарм, Фанни, Лин, Госу, Ланселот, "
             "Хаябуса, Чоу, Лейла, Мия, Алукард, Кагура, Бенедетта, Джулиан, эмблема, сборка",
+    "gta": "GTA 6, Grand Theft Auto VI, Вайс-Сити, Леонида, Джейсон, Люсия, wasted, потрачено, busted, "
+           "копы, розыск, пять звёзд, погоня, ограбление, миссия, пасхалка, тачка, угон",
     "pubg": "PUBG Mobile, нокнул, хэдшот, клатч, вайп, сквад, AWM, M416, Kar98, лут, ред зона, "
             "Erangel, Miramar, Chicken Dinner, топ 1",
 }
@@ -126,6 +128,13 @@ GOAL = {
  funny — смешные моменты: реакция, фейлы, шутки, троллинг, неожиданности.
 Клип начинается за 2–4 с до начала драки и заканчивается сразу после последнего килла/панчлайна.
 Требования:""",
+    "gta": """Это геймплей GTA 6 (Grand Theft Auto VI). Ищи до {n} моментов трёх типов:
+ kill — экшен: погони с полицией, перестрелки, взрывы, аварии и трюки на транспорте, ограбления,
+        смерть (WASTED) или арест (BUSTED) в неожиданный момент, эффектный финал миссии;
+ tip — пасхалки, секреты, баги, скрытые места, полезные фишки игры;
+ funny — смешные моменты: физика и рэгдолл, реакции прохожих, фейлы, реакция стримера, абсурд.
+Клип начинается за 2–4 с до завязки и заканчивается сразу после развязки (взрыв, WASTED, панчлайн).
+Требования:""",
     "pubg": """Это геймплей PUBG Mobile. Ищи до {n} моментов трёх типов:
  kill — убийства и нокауты, хэдшоты, сквад-вайпы, клатчи 1 против нескольких, Winner Winner Chicken Dinner;
  tip — стример объясняет фишку: раскладка, чувствительность, отдача, ротации, лут, тактика;
@@ -212,7 +221,18 @@ _EV = {
         (r"head ?shot|хэд ?шот|хедшот|в голову|ван ?шот|one ?shot", 4, "kill", "HEADSHOT"),
         (r"нокнул|кнокнул|knock|упал|минус|убил|killed|kill", 3, "kill", "KILL"),
     ],
+    # GTA: надписи WASTED/BUSTED на экране ловит ИИ по кадрам, по речи — что происходит у стримера
+    "gta": [
+        (r"wasted|потрачен", 6, "kill", "WASTED"),
+        (r"mission passed|миссия (выполнена|пройдена)", 6, "kill", "MISSION PASSED"),
+        (r"busted|арестован|повязали|приняли", 5, "kill", "BUSTED"),
+        (r"взрыв|взорвал|бабах|рванул|explo", 4, "kill", "ВЗРЫВ"),
+        (r"погон|копы|менты|полиц|зв[её]зд|розыск|wanted|cops", 3, "kill", "ПОГОНЯ"),
+        (r"ограблен|грабим|heist|\brob", 3, "kill", "ОГРАБЛЕНИЕ"),
+        (r"пасхалк|easter egg|секрет|глитч|glitch|\bбаг\b", 4, "tip", "💡"),
+    ],
 }
+SPEECH_ONLY = {"gta"}  # в этих играх нет диктора: слова стримера и есть сигнал, длина фразы не важна
 _COMMON = [
     (r"ах[аx]+|ха-?ха|хах|лол|\blol\b|ору|угар|ржу|смех|laugh|хи-?хи", 4, "funny", "😂"),
     (r"капец|жесть|офиг|бля|блин|what the|wtf|ничего себе|вау|wow|omg", 2, "funny", "😱"),
@@ -261,7 +281,7 @@ def game_events(segments, content: str) -> list[dict]:
             else:
                 t, around, phrase = float(seg["s"]), len(low.split()), low
             strong = True
-            if kind == "kill":
+            if kind == "kill" and content not in SPEECH_ONLY:
                 strong = around <= SHORT_WORDS
                 if strong and content == "mlbb" and label not in NO_ANNOUNCER:
                     strong = bool(ANNOUNCER.search(phrase))
@@ -472,6 +492,7 @@ def split_sequential(duration, segments, cuts, lmin, lmax) -> list[dict]:
 _BASE_TAGS = {
     "mlbb": "#mlbb #mobilelegends #mobilelegendsbangbang #mlbbshorts #shorts",
     "pubg": "#pubgmobile #pubg #pubgm #pubgshorts #shorts",
+    "gta": "#gta6 #gtavi #gta #grandtheftauto #gta6gameplay #shorts",
     "movie": "#фильм #кино #моменты #shorts",
     "auto": "#shorts #viral",
 }
@@ -490,6 +511,7 @@ def publish_text(clip: dict, segments, content: str, lang: str = "ru", must_tags
 def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
     tags = _BASE_TAGS.get(content, _BASE_TAGS["auto"])
     fallback_title = clip.get("title") or {"mlbb": "Этот момент в MLBB 🔥", "pubg": "Жёсткий момент в PUBG Mobile",
+                                           "gta": "Этот момент в GTA 6 🔥",
                                            "movie": "Лучший момент фильма"}.get(content, "Смотри до конца 👀")
     base = {"title": fallback_title[:90],
             "desc": f"{_TYPE_WORD.get(clip.get('type'), 'лучший момент').capitalize()}. "
@@ -514,6 +536,14 @@ def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
         log.warning("publish_text failed: %s", e)
         return base
 
+
+
+_VISION_ASK = {
+    "gta": """Для каждого кадра определи, есть ли на экране яркое событие: надпись WASTED/ПОТРАЧЕНО, BUSTED/АРЕСТОВАН,
+MISSION PASSED/МИССИЯ ВЫПОЛНЕНА, большой взрыв, авария на скорости, перестрелка, 4–5 звёзд розыска.
+Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"WASTED","w":6}}]}} — только кадры с событием;
+w: 3 погоня/перестрелка, 4 взрыв/авария, 5 busted, 6 wasted/mission passed.""",
+}
 
 
 def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
@@ -542,8 +572,10 @@ def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
                                                     "data": base64.b64encode(img).decode()}}]
     if not blocks:
         return []
-    game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile"}.get(content, content)
-    blocks.append({"type": "text", "text": f"""Это кадры геймплея {game}.
+    game = {"mlbb": "Mobile Legends: Bang Bang", "pubg": "PUBG Mobile",
+            "gta": "GTA 6 (Grand Theft Auto VI)"}.get(content, content)
+    ask = _VISION_ASK.get(content)
+    blocks.append({"type": "text", "text": f"Это кадры геймплея {game}.\n" + ask.format() if ask else f"""Это кадры геймплея {game}.
 Для каждого кадра определи, есть ли на экране баннер/надпись убийства (в MLBB: «Убил», Double/Triple Kill,
 Maniac, Savage, Wiped Out, Shut Down; в PUBG: «вы убили/нокаут», kill feed с вашим ником).
 Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"SAVAGE","w":10}}]}} — только кадры с убийством;

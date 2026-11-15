@@ -83,6 +83,43 @@ def test_gpu_error_filter():
     assert ai._gpu_error(RuntimeError("CUDA failed with error out of memory"))
 
 
+def test_gta_events():
+    assert kinds("Потрачено!", "gta")[0] == ("kill", "WASTED")
+    # в GTA нет диктора — слово стримера в длинной фразе тоже сигнал
+    assert kinds("за нами копы уже пять звёзд давай быстрее гони", "gta")[0][0] == "kill"
+    assert ("tip", "💡") in kinds("смотрите тут пасхалка", "gta")
+
+
+def test_live_sends_only_strong_moments():
+    from app import live
+    ev = [{"t": 100.0, "w": 6, "kind": "kill", "label": "WASTED"},
+          {"t": 150.0, "w": 2.4, "kind": "talk", "label": "x"}]
+    clips = [{"start": 90, "end": 110, "score": 3}, {"start": 140, "end": 160, "score": 3},
+             {"start": 2, "end": 18, "score": 9}, {"start": 40, "end": 70, "score": 8}]
+    assert [c["start"] for c in live.worth_it(clips, ev, 20.0, False)] == [90]       # без ИИ — только с событием
+    assert [c["start"] for c in live.worth_it(clips, ev, 20.0, True)] == [90, 40]    # с ИИ — ещё оценка 7+
+    # клип целиком в хвосте прошлого куска не повторяется (start=2..18 при хвосте 20 с)
+
+
+def test_live_chunks_and_window(tmp=Path("/tmp/shorts_live")):
+    import shutil
+    from app import live, media
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=35",
+                    "-f", "lavfi", "-i", "sine=f=440:d=35", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-g", "30", "-c:a", "aac", str(tmp / "stream.ts")], check=True)
+    proc = live.start([(str(tmp / "stream.ts"), {})], tmp / "rec", chunk=10)
+    proc.wait(60)
+    chunks = live.ready_chunks(tmp / "rec", set(), finished=True)
+    assert len(chunks) >= 3, chunks
+    assert len(live.ready_chunks(tmp / "rec", set(), finished=False)) == len(chunks) - 1
+    live.save_tail(chunks[0], tmp / "tail.ts", 4)
+    win, overlap = live.make_window(chunks[1], tmp / "tail.ts", tmp / "w")
+    a, b = media.probe(chunks[1]), media.probe(win)
+    assert 2 <= overlap <= 6 and abs(b["duration"] - a["duration"] - overlap) < 1.0 and b["audio"]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
