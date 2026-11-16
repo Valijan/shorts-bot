@@ -544,7 +544,7 @@ class Recorder(threading.Thread):
 # ---------- Сессия: запись + чат + детектор ----------
 
 class LiveSession:
-    def __init__(self, source, root: Path, on_clip, on_event=None, src_cmd=None, **det):
+    def __init__(self, source, root: Path, on_clip, on_event=None, src_cmd=None, busy=None, **det):
         src = parse_source(source) if isinstance(source, str) else source
         if not src:
             raise ValueError(f"не понял, что смотреть: {source}")
@@ -563,6 +563,7 @@ class LiveSession:
                     cooldown=cfg.LIVE_COOLDOWN)
         opts.update(det)
         self.det = Detector(**opts)
+        self.det_opts, self.busy, self.back = opts, busy, None
         self.yt_id, self.yt_status, self._ended_said = None, "", False
         if yt:
             self.chat = YTChat(self.key, self.stop_ev, lambda: self.yt_id)
@@ -615,10 +616,20 @@ class LiveSession:
     def _state(self, live: bool):
         if live:
             self.on_event(f"▶️ <b>{self.label}</b> в эфире — записываю и слежу за чатом.")
+            if self.back is None and cfg.LIVE_BACKFILL and self.src["platform"] == "twitch" and not self.rec.src_cmd:
+                # эфир уже шёл до нас — параллельно разбираем его с самого начала по записи
+                from .backfill import Backfill
+                self.back = Backfill(self.key, self.label, self.dir, self.stop_ev, self._back_clip,
+                                     self.on_event, self.busy, **self.det_opts)
+                self.back.start()
         else:
             self.det.reset()
             self.on_event(f"⏹ Эфир <b>{self.label}</b> закончился. Клипов: {self.clips}. "
                           f"Жду следующий запуск.")
+
+    def _back_clip(self, path: Path, info: dict):
+        self.clips += 1
+        self.on_clip(path, info)
 
     def _loop(self):
         nxt = time.time()
@@ -663,5 +674,6 @@ class LiveSession:
                      f"норма {n['norm']:.0f} · всплеск от {n['hot']:.0f}")
         else:
             level = f"сейчас {n['users']} чел. за 10 с · считаю норму (первые 3 мин)"
+        back = f"\n⏪ {self.back.state}" if self.back and self.back.state else ""
         return (f"<b>{self.label}</b>: {rec}, {chat}\n{level}\n"
-                f"клипов: {self.clips} · слежу {up} мин")
+                f"клипов: {self.clips} · слежу {up} мин{back}")

@@ -53,5 +53,7 @@ LIVE_Z = _float("LIVE_Z", 4.0)             # и выше нормы на сто�
 LIVE_MIN_CHAT = _float("LIVE_MIN_CHAT", 6)  # минимум разных людей за 10 с (для маленьких стримов)
 LIVE_COOLDOWN = _float("LIVE_COOLDOWN", 20)  # пауза между клипами, с
 LIVE_CHANNELS = _int("LIVE_CHANNELS", 2)   # сколько эфиров одновременно
+LIVE_BACKFILL = os.getenv("LIVE_BACKFILL", "1") == "1"  # Twitch: разбирать эфир с самого начала по записи
+LIVE_BACKFILL_MAX = _int("LIVE_BACKFILL_MAX", 30)       # максимум клипов из уже прошедшей части эфира
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)

@@ -306,6 +306,15 @@ HELP = (
 )
 
 
+MENU_COMMANDS = [
+    ("start", "Справка и текущие настройки"), ("live", "Резать эфир Twitch/YouTube: /live канал"),
+    ("settings", "Настройки нарезки"), ("queue", "Очередь задач"), ("cancel", "Отменить текущую задачу"),
+    ("campaigns", "Кампании блогеров"), ("addcampaign", "Добавить кампанию"), ("music", "Фоновая музыка"),
+    ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Выключить сервер сейчас"),
+    ("id", "Мой Telegram ID"), ("help", "Справка"),
+]
+
+
 @router.message(CommandStart())
 async def start(m: Message):
     await m.answer(HELP + "\n\n" + settings_text(m.from_user.id))
@@ -488,6 +497,7 @@ LIVE_HELP = (
     "<code>/live youtube.com/@ник</code> или <code>/live yt ник</code> — YouTube: бот сам найдёт текущий эфир\n"
     "<code>/live ссылка на эфир</code> — конкретный эфир YouTube (watch?v=…, /live/…, youtu.be/…)\n"
     "Можно включить до старта стрима — бот дождётся.\n"
+    "Twitch: если эфир уже идёт, бот разберёт его и с самого начала — по записи и сохранённому чату.\n"
     "<code>/live</code> — что сейчас происходит\n"
     "<code>/live stop</code> — остановить всё · <code>/live stop канал</code> — один эфир")
 
@@ -539,13 +549,16 @@ async def live_cmd(m: Message, bot: Bot):
     def on_event(text):
         asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
 
-    s = live.LiveSession(src, cfg.DATA_DIR / "live", on_clip, on_event)
+    s = live.LiveSession(src, cfg.DATA_DIR / "live", on_clip, on_event, busy=queue.qsize)
     s.start()
     LIVE[key] = s
     where = src["url"].replace("https://", "").replace("www.", "")
     await m.answer(f"👀 Слежу за <b>{html.escape(label)}</b> ({html.escape(where)}).\n"
                    "Как только эфир пойдёт — начну писать. Первые 3 минуты запоминаю, как обычно пишет "
                    "чат этого стрима, дальше режу всплески. Монтаж — по твоим /settings.\n"
+                   + ("Если эфир Twitch уже идёт — заодно разберу его с самого начала по записи и чату.\n"
+                      if src["platform"] == "twitch" and cfg.LIVE_BACKFILL else "") +
+                   
                    "/live — статус · /live stop — стоп")
 
 
@@ -554,7 +567,11 @@ async def _live_clip(bot: Bot, uid: int, chat: int, ch: str, path: Path, info: d
     workdir.mkdir(parents=True, exist_ok=True)
     src = workdir / "source.mp4"
     shutil.move(str(path), src)
-    status = await bot.send_message(chat, f"🔴 <b>{ch}</b>: всплеск в чате — {info['users']} чел. за 10 с "
+    if info.get("at") is not None:   # момент из уже прошедшей части эфира
+        head = f"⏪ <b>{ch}</b>: момент на {fmt_hms(info['at'])} эфира"
+    else:
+        head = f"🔴 <b>{ch}</b>: всплеск в чате"
+    status = await bot.send_message(chat, f"{head} — {info['users']} чел. за 10 с "
                                           f"(обычно ~{info['norm']:.0f}). Монтирую клип…")
     await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
                      "status_id": status.message_id, "channel": ch})
@@ -890,6 +907,11 @@ def ytdl(url: str, outdir: Path) -> Path:
     return files[0]
 
 
+def fmt_hms(t: float) -> str:
+    t = int(max(0, t))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
+
+
 def fmt(t: float) -> str:
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
@@ -1099,6 +1121,11 @@ async def main():
     asyncio.create_task(worker(bot))
     asyncio.create_task(janitor())
     asyncio.create_task(autostop(bot))
+    try:   # команды в меню «/» — чтобы не набирать их руками
+        from aiogram.types import BotCommand
+        await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in MENU_COMMANDS])
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
     log.info("Bot started (local API: %s, LLM: %s)", LOCAL, bool(cfg.ANTHROPIC_API_KEY))
     await dp.start_polling(bot)
 
