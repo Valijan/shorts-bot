@@ -2,6 +2,7 @@ aiogram>=3.13,<4
 faster-whisper>=1.1
 av<14
 yt-dlp
+streamlink>=7
 anthropic>=0.40
 opencv-python-headless>=4.9,<5
 numpy

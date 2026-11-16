@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, pipeline
+from . import ai, fx, live, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -298,6 +298,7 @@ HELP = (
     "• <code>mlbb 2</code>, <code>pubg</code>, <code>фильм 5</code> — тип видео и число клипов\n"
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
+    "🔴 <code>/live канал</code> — резать эфир Twitch или YouTube прямо во время стрима по всплескам чата\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
@@ -474,6 +475,89 @@ async def stop_now(m: Message):
     ok, msg = await asyncio.to_thread(stop_pod)
     if not ok:
         await m.answer(f"Не получилось: {msg}")
+
+
+# ---------- Живой режим ----------
+
+LIVE: dict[str, live.LiveSession] = {}
+LIVE_HELP = (
+    "🔴 <b>Живой режим</b> — режу эфир Twitch или YouTube, пока он идёт.\n"
+    "Бот пишет стрим кусками и читает чат. Когда чат пишет заметно активнее, чем обычно "
+    "на этом стриме, бот берёт момент с запасом 20 с до всплеска и монтирует шортс по /settings.\n\n"
+    "<code>/live канал</code> — Twitch (можно и ссылкой twitch.tv/…)\n"
+    "<code>/live youtube.com/@ник</code> или <code>/live yt ник</code> — YouTube: бот сам найдёт текущий эфир\n"
+    "<code>/live ссылка на эфир</code> — конкретный эфир YouTube (watch?v=…, /live/…, youtu.be/…)\n"
+    "Можно включить до старта стрима — бот дождётся.\n"
+    "<code>/live</code> — что сейчас происходит\n"
+    "<code>/live stop</code> — остановить всё · <code>/live stop канал</code> — один эфир")
+
+
+@router.message(Command("live"))
+async def live_cmd(m: Message, bot: Bot):
+    parts = (m.text or "").split(maxsplit=1)
+    words = parts[1].split() if len(parts) > 1 else []
+    if not words:
+        await m.answer("\n\n".join(s.status() for s in LIVE.values()) if LIVE else LIVE_HELP)
+        return
+    if words[0].lower() in ("stop", "стоп", "off"):
+        rest = " ".join(words[1:])
+        if rest:
+            p = live.parse_source(rest)
+            names = [p["key"]] if p else [rest.lower().lstrip("@")]
+        else:
+            names = list(LIVE)
+        stopped = []
+        for n in names:
+            s = LIVE.pop(n, None)
+            if s:
+                s.stop()
+                stopped.append(f"{s.label} (клипов: {s.clips})")
+        await m.answer("⏹ Остановил: " + ", ".join(stopped) if stopped else "Живой режим и так выключен.")
+        return
+    src = live.parse_source(" ".join(words))
+    if not src:
+        await m.answer("Не понял, что смотреть. Примеры:\n<code>/live oneshotmlbb</code> — Twitch\n"
+                       "<code>/live https://youtube.com/@ник</code> или <code>/live yt ник</code> — YouTube")
+        return
+    key, label = src["key"], src["label"]
+    if key in LIVE:
+        await m.answer(LIVE[key].status())
+        return
+    if not shutil.which("streamlink"):
+        await m.answer("⚠️ На сервере нет streamlink. Установи: <code>pip install streamlink</code>")
+        return
+    if len(LIVE) >= cfg.LIVE_CHANNELS:
+        await m.answer(f"Уже слежу за: {', '.join(s.label for s in LIVE.values())}. "
+                       "Сначала останови один: /live stop канал")
+        return
+    loop = asyncio.get_running_loop()
+    uid, chat = m.from_user.id, m.chat.id
+
+    def on_clip(path, info):  # вызывается из потока живого режима
+        asyncio.run_coroutine_threadsafe(_live_clip(bot, uid, chat, label, path, info), loop)
+
+    def on_event(text):
+        asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
+
+    s = live.LiveSession(src, cfg.DATA_DIR / "live", on_clip, on_event)
+    s.start()
+    LIVE[key] = s
+    where = src["url"].replace("https://", "").replace("www.", "")
+    await m.answer(f"👀 Слежу за <b>{html.escape(label)}</b> ({html.escape(where)}).\n"
+                   "Как только эфир пойдёт — начну писать. Первые 3 минуты запоминаю, как обычно пишет "
+                   "чат этого стрима, дальше режу всплески. Монтаж — по твоим /settings.\n"
+                   "/live — статус · /live stop — стоп")
+
+
+async def _live_clip(bot: Bot, uid: int, chat: int, ch: str, path: Path, info: dict):
+    workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
+    workdir.mkdir(parents=True, exist_ok=True)
+    src = workdir / "source.mp4"
+    shutil.move(str(path), src)
+    status = await bot.send_message(chat, f"🔴 <b>{ch}</b>: всплеск в чате — {info['users']} чел. за 10 с "
+                                          f"(обычно ~{info['norm']:.0f}). Монтирую клип…")
+    await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
+                     "status_id": status.message_id, "channel": ch})
 
 
 @router.callback_query(F.data == "noop")
@@ -754,6 +838,9 @@ async def autostop(bot: Bot):
         mins = get_global().get("autostop", 0)
         if not mins or STATE["busy"] or not queue.empty() or not os.getenv("RUNPOD_POD_ID"):
             continue
+        if LIVE:  # идёт живой режим — сервер не выключаем
+            STATE["last"], STATE["warned"] = time.time(), False
+            continue
         idle = (time.time() - STATE["last"]) / 60
         users = list(cfg.ALLOWED_USERS)
         if idle >= mins - 2 and not STATE["warned"]:
@@ -815,7 +902,7 @@ TYPE_ICON = {"kill": "🔥 Килл-момент", "tip": "💡 Совет", "fu
 def caption_for(r: dict, st: dict, segments, lang) -> str:
     kind = TYPE_ICON.get(r.get("type", ""), "") if r.get("content") in pipeline.GAMES else ""
     r = {**r, "title": (r.get("title") or "").replace("*", "")}
-    head = (f"<b>{html.escape(r['title'] or 'Клип ' + str(r['index']))}</b>\n"
+    head = (f"<b>{html.escape(r['title'] or r.get('text') or 'Клип ' + str(r['index']))}</b>\n"
             + (f"{kind}\n" if kind else "")
             + (f"⏱ {fmt(r['start'])}–{fmt(r['end'])} из оригинала\n" if not r.get("text") else ""))
     if st.get("pubtext") != "on":
@@ -908,6 +995,20 @@ async def worker(bot: Bot):
                                      force=True, kb=pick_kb(sid))
                     continue
                 await _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, cancelled)
+            elif job["type"] == "live":
+                workdir, src = job["workdir"], job["src"]
+                st = {**get_settings(job["uid"]), "_uid": job["uid"], "review": "off", "ranges": None}
+                if st.get("mode", "auto") == "auto":
+                    st["mode"] = "game"  # стрим: вебка сверху, игра снизу (нет вебки — весь кадр)
+                A = await asyncio.to_thread(pipeline.analyze, src, st, progress)
+                clips = await asyncio.to_thread(pipeline.choose, A, {**st, "ranges": [(0.0, A["dur"])]}, 1)
+                if not clips:
+                    raise RuntimeError("Кусок эфира оказался пустым")
+                for c in clips:
+                    c["text"] = f"🔴 Эфир {job['channel']}"
+                await asyncio.to_thread(pipeline.render, src, workdir, st, A, clips, progress,
+                                        on_clip_factory(st, A), cancelled)
+                await set_status(f"✅ Клип из эфира <b>{job['channel']}</b> готов.", force=True)
             else:
                 sid = job["sid"]
                 s = SESSIONS.get(sid)
