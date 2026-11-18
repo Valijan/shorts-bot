@@ -575,6 +575,8 @@ class LiveSession:
         self.pending: list[dict] = []
         self.clips = 0
         self.started = time.time()
+        self.live_since = None        # когда пошёл эфир (для табло)
+        self.last_spike = None        # когда был последний всплеск
         self.thread = threading.Thread(target=self._loop, daemon=True, name=f"live-{self.key}")
 
     def _yt_url(self) -> str | None:
@@ -614,6 +616,7 @@ class LiveSession:
         self.rec.kill()
 
     def _state(self, live: bool):
+        self.live_since = time.time() if live else None
         if live:
             self.on_event(f"▶️ <b>{self.label}</b> в эфире — записываю и слежу за чатом.")
             if self.back is None and cfg.LIVE_BACKFILL and self.src["platform"] == "twitch" and not self.rec.src_cmd:
@@ -643,6 +646,7 @@ class LiveSession:
                 c = self.det.step(now, msgs, users, armed=self.rec.live)
                 if c:
                     self.pending.append(c)
+                    self.last_spike = now
                 self._flush(now)
             except Exception:
                 log.exception("live loop %s", self.channel)
@@ -664,16 +668,34 @@ class LiveSession:
 
     def status(self) -> str:
         n = self.det.now
-        rec = "🔴 пишу эфир" if self.rec.live else "⚪ жду начала стрима"
-        if not self.rec.live and self.yt_status == "upcoming":
+        if self.rec.live:
+            rec = "🔴 пишу эфир"
+            if self.live_since:
+                rec += f" уже {_hms(time.time() - self.live_since)}"
+        elif self.yt_status == "upcoming":
             rec = "⚪ эфир запланирован, жду начала"
-        chat = "чат ✅" if self.chat.connected else "чат ⏳ подключаюсь"
-        up = int((time.time() - self.started) // 60)
-        if n["ready"]:
-            level = (f"сейчас {n['users']} чел. / {n['msgs']} сообщ. за 10 с · "
-                     f"норма {n['norm']:.0f} · всплеск от {n['hot']:.0f}")
         else:
-            level = f"сейчас {n['users']} чел. за 10 с · считаю норму (первые 3 мин)"
+            rec = "⚪ стрим сейчас не идёт — жду начала"
+        chat = "чат ✅" if self.chat.connected else "чат ⏳ подключаюсь"
+        if not self.rec.live:
+            level = "чат: жду эфир"
+        elif n["ready"]:
+            level = (f"💬 чат сейчас: {n['users']} чел. за 10 с · обычно ~{n['norm']:.0f} · "
+                     f"клип будет, когда дойдёт до {n['hot']:.0f}")
+        else:
+            left = max(0, int(WARMUP - (time.time() - (self.live_since or time.time()))))
+            level = (f"💬 чат сейчас: {n['users']} чел. за 10 с · запоминаю обычный уровень"
+                     + (f" (ещё ~{left // 60 + 1} мин)" if left else ""))
+        if self.last_spike:
+            spike = f"⚡ последний всплеск: {int((time.time() - self.last_spike) // 60)} мин назад"
+        else:
+            spike = "⚡ всплесков пока не было"
+        wait = f" · ждут видео: {len(self.pending)}" if self.pending else ""
         back = f"\n⏪ {self.back.state}" if self.back and self.back.state else ""
-        return (f"<b>{self.label}</b>: {rec}, {chat}\n{level}\n"
-                f"клипов: {self.clips} · слежу {up} мин{back}")
+        return (f"<b>{self.label}</b>: {rec}, {chat}\n{level}\n{spike}{wait}\n"
+                f"✂️ клипов готово: {self.clips}{back}")
+
+
+def _hms(t: float) -> str:
+    t = int(max(0, t))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60} мин"

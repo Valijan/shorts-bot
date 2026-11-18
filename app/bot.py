@@ -529,6 +529,10 @@ async def live_cmd(m: Message, bot: Bot):
         await m.answer("Не понял, что смотреть. Примеры:\n<code>/live oneshotmlbb</code> — Twitch\n"
                        "<code>/live https://youtube.com/@ник</code> или <code>/live yt ник</code> — YouTube")
         return
+    await start_live(m, bot, src)
+
+
+async def start_live(m: Message, bot: Bot, src: dict):
     key, label = src["key"], src["label"]
     if key in LIVE:
         await m.answer(LIVE[key].status())
@@ -553,13 +557,85 @@ async def live_cmd(m: Message, bot: Bot):
     s.start()
     LIVE[key] = s
     where = src["url"].replace("https://", "").replace("www.", "")
-    await m.answer(f"👀 Слежу за <b>{html.escape(label)}</b> ({html.escape(where)}).\n"
-                   "Как только эфир пойдёт — начну писать. Первые 3 минуты запоминаю, как обычно пишет "
-                   "чат этого стрима, дальше режу всплески. Монтаж — по твоим /settings.\n"
-                   + ("Если эфир Twitch уже идёт — заодно разберу его с самого начала по записи и чату.\n"
+    await m.answer(f"👀 Слежу за <b>{html.escape(label)}</b> ({html.escape(where)}).\n\n"
+                   "<b>Как режу:</b> пишу эфир кусками и читаю чат. Первые 3 минуты запоминаю, сколько "
+                   "обычно пишут в чат. Когда чат резко оживает — значит, на стриме что-то случилось: "
+                   "беру этот момент (20 с до всплеска + несколько секунд после), делаю вертикальное "
+                   "видео с субтитрами и присылаю сюда. Тихий стрим = мало клипов, это нормально.\n"
+                   + ("Если эфир Twitch уже идёт — параллельно разберу его с самого начала по записи и чату.\n"
                       if src["platform"] == "twitch" and cfg.LIVE_BACKFILL else "") +
-                   
-                   "/live — статус · /live stop — стоп")
+                   "\nНиже — табло: оно само обновляется и показывает, что бот делает прямо сейчас.")
+    dash = await bot.send_message(chat, dash_text(s), reply_markup=dash_kb(key))
+    try:
+        await bot.pin_chat_message(chat, dash.message_id, disable_notification=True)
+    except Exception:
+        pass
+    asyncio.create_task(_live_dash(bot, chat, s, dash.message_id))
+
+
+def dash_kb(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"dash:{key}"),
+        InlineKeyboardButton(text="⏹ Остановить", callback_data=f"livestop:{key}")]])
+
+
+def work_line() -> str:
+    job, waiting = STATE.get("job"), queue.qsize()
+    if STATE["busy"] and job:
+        what = f"клип из эфира {job.get('channel', '')}" if job.get("type") == "live" else "видео"
+        stage = re.sub(r"<[^>]+>", "", STATE.get("stage") or "начинаю…")
+        line = f"🎬 Монтирую {what}: {stage}"
+    else:
+        line = "🎬 Монтаж: свободен — жду момент из эфира"
+    return line + (f"\n📥 В очереди на монтаж: {waiting}" if waiting else "")
+
+
+def dash_text(s) -> str:
+    now = time.strftime("%H:%M:%S", time.gmtime(time.time() + cfg.TZ_OFFSET * 3600))
+    return (f"📡 <b>Табло живого режима</b> (обновляется само)\n\n{s.status()}\n\n{work_line()}"
+            f"\n\n<i>обновлено {now}</i>")
+
+
+async def _live_dash(bot: Bot, chat: int, s, mid: int):
+    last = ""
+    while LIVE.get(s.key) is s:
+        text = dash_text(s)
+        if text != last:
+            try:
+                await bot.edit_message_text(text, chat_id=chat, message_id=mid, reply_markup=dash_kb(s.key))
+                last = text
+            except TelegramBadRequest as e:
+                if "not found" in str(e).lower():
+                    break
+            except Exception:
+                log.exception("dash")
+        await asyncio.sleep(cfg.LIVE_DASH_EVERY)
+    try:
+        await bot.edit_message_text(f"⏹ <b>{html.escape(s.label)}</b>: живой режим остановлен. "
+                                    f"Клипов: {s.clips}.", chat_id=chat, message_id=mid)
+        await bot.unpin_chat_message(chat, message_id=mid)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("dash:"))
+async def on_dash(c: CallbackQuery):
+    s = LIVE.get(c.data.split(":", 1)[1])
+    if not s:
+        return await c.answer("Живой режим уже остановлен")
+    try:
+        await c.message.edit_text(dash_text(s), reply_markup=dash_kb(s.key))
+    except TelegramBadRequest:
+        pass
+    await c.answer("Обновлено")
+
+
+@router.callback_query(F.data.startswith("livestop:"))
+async def on_livestop(c: CallbackQuery):
+    s = LIVE.pop(c.data.split(":", 1)[1], None)
+    if s:
+        s.stop()
+    await c.answer("Остановил" if s else "Уже остановлен")
 
 
 async def _live_clip(bot: Bot, uid: int, chat: int, ch: str, path: Path, info: dict):
@@ -714,8 +790,18 @@ async def on_file(m: Message):
 
 
 @router.message(F.text.regexp(URL_RE))
-async def on_link(m: Message):
+async def on_link(m: Message, bot: Bot):
     url = URL_RE.search(m.text).group(0)
+    src = live.parse_source(url)
+    if src and (src["platform"] == "twitch" or "/live/" in url):
+        # ссылка на канал Twitch или на эфир YouTube — это стрим, а не готовое видео
+        await m.answer("🔴 Это прямой эфир — включаю живой режим (не жду, пока стрим закончится).")
+        return await start_live(m, bot, src)
+    if src and src["platform"] == "youtube":
+        vid, status = await asyncio.to_thread(live.yt_resolve, url)
+        if status in ("live", "upcoming"):
+            await m.answer("🔴 Это прямой эфир — включаю живой режим (не жду, пока стрим закончится).")
+            return await start_live(m, bot, src)
     await enqueue(m, {"type": "new", "src": "url", "url": url, "label": url[:40],
                       "over": parse_overrides(m.text)})
 
@@ -883,20 +969,47 @@ async def autostop(bot: Bot):
 
 # ---------- Обработка ----------
 
-def ytdl(url: str, outdir: Path) -> Path:
+def ytdl(url: str, outdir: Path, progress=None) -> Path:
     from yt_dlp import YoutubeDL
+
+    stopped = {"v": False}
+
+    def hook(d):
+        if not progress or d.get("status") != "downloading":
+            return
+        done, total = d.get("downloaded_bytes") or 0, d.get("total_bytes") or d.get("total_bytes_estimate")
+        try:
+            if total:
+                progress(f"⬇️ Скачиваю видео… {done * 100 // total}% ({done >> 20} из {total >> 20} МБ)")
+            else:
+                progress(f"⬇️ Скачиваю видео… {done >> 20} МБ")
+        except pipeline.Cancelled:
+            stopped["v"] = True
+            raise
 
     opts = {
         "outtmpl": str(outdir / "source.%(ext)s"),
         "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
         "merge_output_format": "mp4", "noplaylist": True, "quiet": True, "no_warnings": True,
+        "progress_hooks": [hook],
     }
     if cfg.YTDLP_COOKIES and Path(cfg.YTDLP_COOKIES).exists():
         opts["cookiefile"] = cfg.YTDLP_COOKIES
     try:
         with YoutubeDL(opts) as y:
-            y.extract_info(url, download=True)
+            info = y.extract_info(url, download=False)
+            if info and (info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming")):
+                # иначе yt-dlp будет «скачивать» стрим часами, пока он не закончится
+                raise RuntimeError("Это прямой эфир, а не готовое видео. Включи живой режим: "
+                                   "/live и эту ссылку (или ник канала) — клипы пойдут по ходу стрима.")
+            if progress:
+                progress("⬇️ Скачиваю видео… 0%")
+            y.process_ie_result(info, download=True)
+    except pipeline.Cancelled:
+        raise
     except Exception as e:
+        if stopped["v"]:
+            raise pipeline.Cancelled() from None
         if "not a bot" in str(e) or "Sign in" in str(e):
             raise RuntimeError("YouTube не даёт скачать с сервера (просит вход). "
                                "Скачай видео на телефон и пришли сюда файлом — до 2 ГБ.") from None
@@ -952,6 +1065,7 @@ async def worker(bot: Bot):
         workdir = local_src = None
 
         async def set_status(text: str, force=False, kb=None):
+            STATE["stage"] = text
             if text == last["text"] or (not force and time.time() - last["t"] < 3):
                 return
             last.update(t=time.time(), text=text)
@@ -988,7 +1102,7 @@ async def worker(bot: Bot):
                 workdir.mkdir(parents=True, exist_ok=True)
                 await set_status("⬇️ Скачиваю видео…", force=True)
                 if job["src"] == "url":
-                    src = await asyncio.to_thread(ytdl, job["url"], workdir)
+                    src = await asyncio.to_thread(ytdl, job["url"], workdir, progress)
                 else:
                     tg_file = await bot.get_file(job["file_id"])
                     if LOCAL and os.path.isabs(tg_file.file_path) and os.path.exists(tg_file.file_path):
@@ -1060,7 +1174,7 @@ async def worker(bot: Bot):
                 shutil.rmtree(workdir, ignore_errors=True)
                 if local_src:
                     local_src.unlink(missing_ok=True)
-            STATE.update(busy=False, cancel=False, job=None, last=time.time(), warned=False)
+            STATE.update(busy=False, cancel=False, job=None, stage="", last=time.time(), warned=False)
             queue.task_done()
 
 
