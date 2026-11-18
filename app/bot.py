@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, chatmood, fx, live, night, pipeline
+from . import ai, chatmood, fx, live, night, pipeline, safety, ytupload
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -46,7 +46,7 @@ DEFAULTS = {"content": "auto", "pick": "best", "clips": 5, "length": "auto", "co
             "pubtext": "on", "mark": "", "director": "on", "jumpcut": "auto", "teaser": "auto", "pbar": "auto",
             "loop": "auto", "censor": "off", "sub_anim": "pop", "vision": "on",
             "camp_label": "", "camp_tags": "", "camp_id": "", "camp_min": 0}
-GLOBAL_DEFAULTS = {"autostop": 30}
+GLOBAL_DEFAULTS = {"autostop": 30, "yt_mode": "off", "yt_vis": "PUBLIC"}
 OPTIONS = {
     "content": [("🎬 Обычное", "auto"), ("🎥 Фильм", "movie"), ("⚔️ MLBB", "mlbb"), ("🔫 PUBG M", "pubg")],
     "pick": [("🔥 Лучшие", "best"), ("📼 По порядку", "seq"), ("🏆 Топ-5", "top")],
@@ -93,7 +93,7 @@ MENUS = {
     "fx": ("✨ Эффекты и звук", ["fx", "jumpcut", "teaser", "loop", "pbar", "music", "review", "pubtext"]),
     "srv": ("🖥 Сервер", ["autostop"]),
 }
-GLOBAL_KEYS = {"autostop"}
+GLOBAL_KEYS = {"autostop", "yt_mode", "yt_vis"}
 PRESETS = {
     "mlbb": ("⚔️ MLBB-стрим", {"content": "mlbb", "pick": "best", "length": "auto", "mode": "game",
                                "title": "hook", "sub_words": "1", "sub_pos": "bottom", "fx": "auto",
@@ -311,7 +311,7 @@ HELP = (
 
 MENU_COMMANDS = [
     ("start", "Справка и текущие настройки"), ("live", "Резать эфир Twitch/YouTube: /live канал"),
-    ("night", "Ночью: несколько стримеров по очереди"),
+    ("night", "Ночью: несколько стримеров по очереди"), ("youtube", "Публикация на YouTube"),
     ("settings", "Настройки нарезки"), ("queue", "Очередь задач"), ("cancel", "Отменить текущую задачу"),
     ("campaigns", "Кампании блогеров"), ("addcampaign", "Добавить кампанию"), ("music", "Фоновая музыка"),
     ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Остановить всю работу"),
@@ -879,6 +879,154 @@ async def _night_clip(bot: Bot, uid: int, chat: int, login: str, path: Path, inf
                      "mood": info.get("mood")})
 
 
+# ---------- Публикация на YouTube (через браузер на ПК) ----------
+
+OUTBOX = cfg.DATA_DIR / "outbox"
+YTQ: asyncio.Queue = asyncio.Queue()
+YT_LABELS = {"off": "выкл", "button": "кнопка под клипом", "auto": "автоматически"}
+VIS_LABELS = {"PUBLIC": "публично", "UNLISTED": "по ссылке", "PRIVATE": "приватно"}
+
+
+def yt_prepare(r: dict, st: dict, A: dict) -> dict | None:
+    """Кладёт клип в «исходящие» для YouTube: название, описание, проверка 18+."""
+    g = get_global()
+    mode = g.get("yt_mode", "off")
+    if mode == "off" or not ytupload.available():
+        return None
+    OUTBOX.mkdir(parents=True, exist_ok=True)
+    ytupload.cleanup_old(OUTBOX)
+    cid = uuid.uuid4().hex[:10]
+    shutil.copy(r["path"], OUTBOX / f"{cid}.mp4")
+    speech = " ".join(sg.get("text", "") for sg in A.get("segments", [])
+                      if sg.get("end", 0) >= r["start"] and sg.get("start", 0) <= r["end"])
+    md = r.get("mood") or {}
+    chk = safety.check(speech, None, md.get("adult", 0.0))
+    base = (r.get("text") or r.get("title") or "Момент со стрима").replace("*", "").strip()
+    title = f"{base} #shorts"[:100]
+    tags = TAGS.get(r.get("content", "auto"), "#shorts")
+    desc = f"{base}\n\n{tags}\nTG: @qwertyu_zxc"
+    meta = {"title": title, "desc": desc, "adult": chk["adult"], "reasons": chk["reasons"]}
+    (OUTBOX / f"{cid}.json").write_text(json.dumps(meta, ensure_ascii=False))
+    return {"id": cid, "mode": mode, **chk}
+
+
+def yt_kb(cid: str, adult: bool) -> InlineKeyboardMarkup:
+    t = "📤 На YouTube (18+)" if adult else "📤 На YouTube"
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=f"ytup:{cid}"),
+                                                  InlineKeyboardButton(text="✖️", callback_data=f"ytno:{cid}")]])
+
+
+async def yt_worker(bot: Bot):
+    while True:
+        cid, chat = await YTQ.get()
+        try:
+            f, mf = OUTBOX / f"{cid}.mp4", OUTBOX / f"{cid}.json"
+            if not f.exists():
+                await bot.send_message(chat, "Клип для YouTube уже удалён (старше 3 дней).")
+                continue
+            meta = json.loads(mf.read_text())
+            msg = await bot.send_message(chat, f"📤 Загружаю на YouTube: {html.escape(meta['title'])}"
+                                               + (" · 🔞 с ограничением 18+" if meta["adult"] else "") + "…")
+            res = await asyncio.to_thread(ytupload.upload, f, meta["title"], meta["desc"], meta["adult"],
+                                          get_global().get("yt_vis", "PUBLIC"))
+            if res["ok"]:
+                note = (" ⚠️ Настройку 18+ не нашёл — загрузил приватно, проверь в Studio."
+                        if res["private_fallback"] else "")
+                await msg.edit_text(f"✅ На YouTube: {html.escape(meta['title'])}\n{res['url'] or 'ссылка в Studio'}"
+                                    + (f"\n🔞 {', '.join(meta['reasons'])}" if meta["adult"] else "") + note)
+                f.unlink(missing_ok=True)
+                mf.unlink(missing_ok=True)
+            else:
+                await msg.edit_text(f"❌ YouTube: {html.escape(res['error'])}\nКлип сохранён, можно повторить кнопкой.",
+                                    reply_markup=yt_kb(cid, meta["adult"]))
+                if res.get("shot"):
+                    await bot.send_photo(chat, FSInputFile(res["shot"]), caption="Скриншот ошибки — пришли его Claude")
+        except Exception as e:
+            log.exception("yt worker")
+            await bot.send_message(chat, f"❌ YouTube: {html.escape(str(e)[:200])}")
+        finally:
+            YTQ.task_done()
+
+
+def yt_menu_kb() -> InlineKeyboardMarkup:
+    g = get_global()
+    modes = [InlineKeyboardButton(text=("✅ " if g["yt_mode"] == k else "") + v, callback_data=f"ytset:yt_mode:{k}")
+             for k, v in YT_LABELS.items()]
+    vis = [InlineKeyboardButton(text=("✅ " if g["yt_vis"] == k else "") + v, callback_data=f"ytset:yt_vis:{k}")
+           for k, v in VIS_LABELS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Войти в YouTube (окно на ПК)", callback_data="ytlogin")],
+        [InlineKeyboardButton(text="🔎 Проверить вход", callback_data="ytcheck")], modes, vis])
+
+
+def yt_menu_text() -> str:
+    g = get_global()
+    return ("📤 <b>Публикация на YouTube</b>\n"
+            f"Режим: <b>{YT_LABELS[g['yt_mode']]}</b> · видимость: <b>{VIS_LABELS[g['yt_vis']]}</b>\n\n"
+            "Перед загрузкой бот проверяет клип на 18+ (мат и откровенные темы в речи, реакция чата) и сам "
+            "ставит «Возрастное ограничение» и «Не для детей». Откровенный контент сам не публикует — спросит.\n"
+            "Первый раз: «Войти» — на ПК откроется Chrome, войди в Google (через AnyDesk). Один раз."
+            + ("" if ytupload.available() else "\n\n⚠️ На этом сервере нет Playwright — публикация недоступна."))
+
+
+@router.message(Command("youtube"))
+async def youtube_cmd(m: Message):
+    await m.answer(yt_menu_text(), reply_markup=yt_menu_kb())
+
+
+@router.callback_query(F.data.startswith("ytset:"))
+async def on_ytset(c: CallbackQuery):
+    _, key, val = c.data.split(":", 2)
+    set_setting(c.from_user.id, key, val)
+    try:
+        await c.message.edit_text(yt_menu_text(), reply_markup=yt_menu_kb())
+    except TelegramBadRequest:
+        pass
+    await c.answer("Сохранено")
+
+
+@router.callback_query(F.data == "ytlogin")
+async def on_ytlogin(c: CallbackQuery):
+    await c.answer()
+    await c.message.answer("🔑 На ПК открывается окно Chrome с YouTube Studio. Войди в свой Google-аккаунт "
+                           "(через AnyDesk) — жду до 15 минут.")
+    ok, info = await asyncio.to_thread(ytupload.login_window)
+    await c.message.answer(f"✅ Вход выполнен: {html.escape(info)}" if ok else f"❌ {html.escape(info)}")
+
+
+@router.callback_query(F.data == "ytcheck")
+async def on_ytcheck(c: CallbackQuery):
+    await c.answer("Проверяю…")
+    try:
+        ok, info = await asyncio.to_thread(ytupload.status)
+    except Exception as e:
+        ok, info = False, str(e)[:200]
+    await c.message.answer(f"✅ YouTube подключён: {html.escape(info)}" if ok else f"❌ {html.escape(info)}")
+
+
+@router.callback_query(F.data.startswith("ytup:"))
+async def on_ytup(c: CallbackQuery):
+    cid = c.data.split(":", 1)[1]
+    await YTQ.put((cid, c.message.chat.id))
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await c.answer("В очереди на YouTube")
+
+
+@router.callback_query(F.data.startswith("ytno:"))
+async def on_ytno(c: CallbackQuery):
+    cid = c.data.split(":", 1)[1]
+    for ext in ("mp4", "json"):
+        (OUTBOX / f"{cid}.{ext}").unlink(missing_ok=True)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await c.answer("Не публикую")
+
+
 @router.callback_query(F.data == "noop")
 async def noop(c: CallbackQuery):
     await c.answer()
@@ -1313,9 +1461,18 @@ async def worker(bot: Bot):
                 await bot.send_message(chat, f"Клип {r['index']} слишком большой для отправки.")
                 return
             cap = await asyncio.to_thread(caption_for, r, st, A["segments"], A["lang"])
+            yt = await asyncio.to_thread(yt_prepare, r, st, A)
+            kb = None
+            if yt and (yt["mode"] == "button" or yt["block"]):
+                kb = yt_kb(yt["id"], yt["adult"])
             await bot.send_video(chat, FSInputFile(r["path"]), caption=cap, width=1080, height=1920,
                                  duration=int(r["end"] - r["start"]), supports_streaming=True,
-                                 request_timeout=600)
+                                 request_timeout=600, reply_markup=kb)
+            if yt and yt["block"]:
+                await bot.send_message(chat, "🔞 Похоже на откровенный контент (" + ", ".join(yt["reasons"]) +
+                                       "). Сам публиковать не стал — реши кнопкой под клипом.")
+            elif yt and yt["mode"] == "auto":
+                await YTQ.put((yt["id"], chat))
 
         def on_clip_factory(st, A):
             def on_clip(r):
@@ -1476,6 +1633,7 @@ async def main():
     asyncio.create_task(worker(bot))
     asyncio.create_task(janitor())
     asyncio.create_task(autostop(bot))
+    asyncio.create_task(yt_worker(bot))
     try:   # команды в меню «/» — чтобы не набирать их руками
         from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
         cmds = [BotCommand(command=c, description=d) for c, d in MENU_COMMANDS]

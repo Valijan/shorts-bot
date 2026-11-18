@@ -249,7 +249,7 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
         r = {"path": final, "title": c.get("title", ""), "start": c.get("orig_start", c["start"]),
              "end": c.get("orig_end", c["end"]),
              "type": c.get("type", ""), "content": content, "index": i, "total": len(clips),
-             "text": c.get("text", "")}
+             "text": c.get("text", ""), "mood": c.get("mood")}
         if on_clip:
             on_clip(r)  # отправляем сразу и удаляем, чтобы не копить на диске
             final.unlink(missing_ok=True)

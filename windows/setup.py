@@ -54,6 +54,9 @@ def main():
     subprocess.run([str(py), "-m", "pip", "install", "-q", "--upgrade", "pip"])
     subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(DIR / "requirements.txt")], check=True)
 
+    # браузер для публикации на YouTube: берём установленный Chrome, а если его нет — свой Chromium
+    subprocess.run([str(py), "-m", "playwright", "install", "chromium"], capture_output=True)
+
     ff = DIR / "ffmpeg" / "bin"
     if not (ff / "ffmpeg.exe").exists():
         step("Скачиваю ffmpeg (~100 МБ)…")

@@ -34,9 +34,12 @@ _WORD = re.compile(r"[\wЀ-ӿ]+|[^\s\w]", re.U)
 
 def classify(texts: list[str]) -> dict:
     """{'kind', 'emoji', 'label', 'share', 'noise', 'skip', 'top'} по сообщениям всплеска."""
+    from .safety import CHAT_ADULT, SEXUAL
     texts = [t.strip() for t in texts if t and t.strip()]
     if len(texts) < 4:
-        return {"kind": "", "emoji": "⚡", "label": "Момент", "share": 0.0, "noise": 0.0, "skip": False, "top": []}
+        return {"kind": "", "emoji": "⚡", "label": "Момент", "share": 0.0, "noise": 0.0, "skip": False,
+                "top": [], "adult": 0.0}
+    adult = sum(1 for t in texts if CHAT_ADULT.search(t) or SEXUAL.search(t)) / len(texts)
     hits = Counter()
     noise = 0
     for t in texts:
@@ -56,7 +59,8 @@ def classify(texts: list[str]) -> dict:
         kind = ""
     emoji, label = KINDS.get(kind, ("⚡", "Момент"))
     return {"kind": kind, "emoji": emoji, "label": label, "share": round(share, 2),
-            "noise": round(noise_share, 2), "skip": noise_share >= 0.5 and share < 0.2, "top": top}
+            "noise": round(noise_share, 2), "skip": noise_share >= 0.5 and share < 0.2, "top": top,
+            "adult": round(adult, 2)}
 
 
 def describe(m: dict) -> str:
