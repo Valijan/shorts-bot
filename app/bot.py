@@ -282,6 +282,8 @@ CAMPS_HELP = ("💰 <b>Кампании</b> — условия блогеров,
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
+        if user and user.is_bot:
+            return   # служебные сообщения от самого бота (например «закрепил табло») — молча пропускаем
         if cfg.ALLOWED_USERS and user and user.id not in cfg.ALLOWED_USERS:
             if isinstance(event, Message):
                 await event.answer(f"⛔ Нет доступа. Ваш ID: <code>{user.id}</code>")
