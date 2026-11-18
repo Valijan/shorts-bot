@@ -59,7 +59,17 @@ if [ -n "${TG_API_ID:-}" ] && [ -n "${TG_API_HASH:-}" ]; then
     apt-get install -y -qq make git zlib1g-dev libssl-dev gperf cmake g++ >/dev/null
     rm -rf /tmp/tba && git clone -q --recursive --depth 1 https://github.com/tdlib/telegram-bot-api /tmp/tba
     mkdir -p /tmp/tba/build /workspace/bin && cd /tmp/tba/build
-    cmake -DCMAKE_BUILD_TYPE=Release .. >/dev/null && cmake --build . --target telegram-bot-api -j"$(nproc)" >/dev/null
+    # nproc в контейнере видит все ядра сервера (у RunPod до 96) — берём лимит pod'а,
+    # иначе десятки компиляторов съедают всю память и сборка падает
+    J=$(nproc)
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+      read -r Q P < /sys/fs/cgroup/cpu.max
+      [ "$Q" != "max" ] && J=$(( (Q + P - 1) / P ))
+    fi
+    MEM=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+    if [ "$MEM" != "max" ]; then JM=$(( MEM / 2500000000 )); [ "$JM" -lt "$J" ] && J=$JM; fi
+    [ "$J" -lt 1 ] && J=1; [ "$J" -gt 16 ] && J=16
+    cmake -DCMAKE_BUILD_TYPE=Release .. >/dev/null && cmake --build . --target telegram-bot-api -j"$J" >/dev/null
     cp telegram-bot-api "$BIN" && cd - >/dev/null && rm -rf /tmp/tba
   fi
   TOKEN="${BOT_TOKEN:-$(grep -oP '^BOT_TOKEN=\K.*' .env 2>/dev/null)}"
