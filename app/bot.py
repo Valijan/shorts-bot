@@ -468,6 +468,10 @@ async def cancel(m: Message):
         queue.task_done()
         if j.get("uid") == uid:
             removed += 1
+            if j.get("status_id"):
+                DROPPED.append((j["chat_id"], j["status_id"]))
+            if j.get("live_key"):
+                shutil.rmtree(j.get("workdir", ""), ignore_errors=True)
         else:
             kept.append(j)
     for j in kept:
@@ -475,9 +479,12 @@ async def cancel(m: Message):
     running = STATE["job"] and STATE["job"].get("uid") == uid
     if running:
         STATE["cancel"] = True
-    await m.answer("🛑 " + ("Останавливаю текущую задачу. " if running else "")
-                   + (f"Убрал из очереди: {removed}." if removed else "")
-                   if running or removed else "Нечего отменять.")
+    lives = [x for x in (stop_live(k) for k in list(LIVE)) if x]
+    parts = (["Останавливаю текущий монтаж."] if running else []) + \
+            ([f"Убрал из очереди: {removed}."] if removed else []) + \
+            ([f"Живой режим выключен: {'; '.join(lives)}."] if lives else [])
+    await m.answer("🛑 " + " ".join(parts) if parts else "Нечего отменять.")
+    await mark_dropped(m.bot)
 
 
 @router.message(Command("stop"))
@@ -518,13 +525,10 @@ async def live_cmd(m: Message, bot: Bot):
             names = [p["key"]] if p else [rest.lower().lstrip("@")]
         else:
             names = list(LIVE)
-        stopped = []
-        for n in names:
-            s = LIVE.pop(n, None)
-            if s:
-                s.stop()
-                stopped.append(f"{s.label} (клипов: {s.clips})")
-        await m.answer("⏹ Остановил: " + ", ".join(stopped) if stopped else "Живой режим и так выключен.")
+        stopped = [stop_live(n) for n in names]
+        stopped = [x for x in stopped if x]
+        await m.answer("⏹ Остановил: " + "; ".join(stopped) if stopped else "Живой режим и так выключен.")
+        await mark_dropped(bot)
         return
     src = live.parse_source(" ".join(words))
     if not src:
@@ -534,11 +538,58 @@ async def live_cmd(m: Message, bot: Bot):
     await start_live(m, bot, src)
 
 
+DROPPED: list[tuple[int, int]] = []   # сообщения «Монтирую…» у выкинутых из очереди клипов
+
+
+async def mark_dropped(bot: Bot):
+    while DROPPED:
+        chat, mid = DROPPED.pop()
+        try:
+            await bot.edit_message_text("⏹ Отменено.", chat_id=chat, message_id=mid)
+        except Exception:
+            pass
+
+
+def stop_live(key: str) -> str:
+    """Останавливает эфир полностью: запись, разбор начала, его клипы в очереди и текущий монтаж."""
+    s = LIVE.pop(key, None)
+    if not s:
+        return ""
+    s.stop()
+    kept, dropped = [], 0
+    while not queue.empty():
+        j = queue.get_nowait()
+        queue.task_done()
+        if j.get("live_key") == key:
+            dropped += 1
+            shutil.rmtree(j.get("workdir", ""), ignore_errors=True)
+            DROPPED.append((j["chat_id"], j["status_id"]))
+        else:
+            kept.append(j)
+    for j in kept:
+        queue.put_nowait(j)
+    job = STATE.get("job")
+    cut = bool(job and job.get("live_key") == key)
+    if cut:
+        STATE["cancel"] = True
+    extra = [f"клипов: {s.clips}"]
+    if dropped:
+        extra.append(f"убрал из очереди: {dropped}")
+    if cut:
+        extra.append("текущий монтаж прерван")
+    return f"{s.label} ({', '.join(extra)})"
+
+
 async def start_live(m: Message, bot: Bot, src: dict):
     key, label = src["key"], src["label"]
     if key in LIVE:
         await m.answer(LIVE[key].status())
         return
+    if LIVE and cfg.LIVE_CHANNELS <= 1:
+        # новый стример — значит, старый больше не нужен: переключаемся, а не копим очередь
+        old = "; ".join(x for x in (stop_live(k) for k in list(LIVE)) if x)
+        await m.answer(f"🔁 Переключаюсь. Остановил: {old}")
+        await mark_dropped(bot)
     if not shutil.which("streamlink"):
         await m.answer("⚠️ На сервере нет streamlink. Установи: <code>pip install streamlink</code>")
         return
@@ -550,7 +601,7 @@ async def start_live(m: Message, bot: Bot, src: dict):
     uid, chat = m.from_user.id, m.chat.id
 
     def on_clip(path, info):  # вызывается из потока живого режима
-        asyncio.run_coroutine_threadsafe(_live_clip(bot, uid, chat, label, path, info), loop)
+        asyncio.run_coroutine_threadsafe(_live_clip(bot, uid, chat, s, path, info), loop)
 
     def on_event(text):
         asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
@@ -634,13 +685,18 @@ async def on_dash(c: CallbackQuery):
 
 @router.callback_query(F.data.startswith("livestop:"))
 async def on_livestop(c: CallbackQuery):
-    s = LIVE.pop(c.data.split(":", 1)[1], None)
-    if s:
-        s.stop()
-    await c.answer("Остановил" if s else "Уже остановлен")
+    res = stop_live(c.data.split(":", 1)[1])
+    if res:
+        await c.message.answer("⏹ Остановил: " + res)
+        await mark_dropped(c.bot)
+    await c.answer("Остановил" if res else "Уже остановлен")
 
 
-async def _live_clip(bot: Bot, uid: int, chat: int, ch: str, path: Path, info: dict):
+async def _live_clip(bot: Bot, uid: int, chat: int, sess, path: Path, info: dict):
+    if LIVE.get(sess.key) is not sess:   # эфир уже остановили — клип не нужен
+        Path(path).unlink(missing_ok=True)
+        return
+    ch = sess.label
     workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
     workdir.mkdir(parents=True, exist_ok=True)
     src = workdir / "source.mp4"
@@ -652,7 +708,7 @@ async def _live_clip(bot: Bot, uid: int, chat: int, ch: str, path: Path, info: d
     status = await bot.send_message(chat, f"{head} — {info['users']} чел. за 10 с "
                                           f"(обычно ~{info['norm']:.0f}). Монтирую клип…")
     await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
-                     "status_id": status.message_id, "channel": ch})
+                     "status_id": status.message_id, "channel": ch, "live_key": sess.key})
 
 
 @router.callback_query(F.data == "noop")

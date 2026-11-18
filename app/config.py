@@ -52,7 +52,7 @@ LIVE_RATIO = _float("LIVE_RATIO", 2.0)     # всплеск = чат в N раз
 LIVE_Z = _float("LIVE_Z", 4.0)             # и выше нормы на столько «обычных колебаний»
 LIVE_MIN_CHAT = _float("LIVE_MIN_CHAT", 6)  # минимум разных людей за 10 с (для маленьких стримов)
 LIVE_COOLDOWN = _float("LIVE_COOLDOWN", 20)  # пауза между клипами, с
-LIVE_CHANNELS = _int("LIVE_CHANNELS", 2)   # сколько эфиров одновременно
+LIVE_CHANNELS = _int("LIVE_CHANNELS", 1)   # сколько эфиров одновременно (1 = новый /live переключает)
 LIVE_BACKFILL = os.getenv("LIVE_BACKFILL", "1") == "1"  # Twitch: разбирать эфир с самого начала по записи
 LIVE_BACKFILL_MAX = _int("LIVE_BACKFILL_MAX", 30)       # максимум клипов из уже прошедшей части эфира
 

@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 FPS = 4
 AW = 480
 CENTER_BIAS = {"mlbb": 0.3, "pubg": 0.5}   # герой / прицел обычно в центре экрана
-CAM_H = 540                                 # высота блока веб-камеры в раскладке stream
+CAM_H = 540                                 # высота блока веб-камеры по умолчанию
+CAM_MIN, CAM_MAX = 420, 760                 # пределы, если подстраиваем под настоящее окно вебки
 BAR_H = 100                                 # полоса с ником под камерой
 
 
@@ -47,6 +48,7 @@ def analyze(clip: Path):
 
     yunet, _, _ = _detectors()
     out, prev = [], None
+    grays = []
     for t, frame in _frames(clip):
         fh, fw = frame.shape[:2]
         sc = AW / fw
@@ -70,7 +72,10 @@ def analyze(clip: Path):
                 mx = float((cols * xs).sum() / tot)
                 spread = float(np.sqrt((cols * (xs - mx) ** 2).sum() / tot))
         out.append({"t": t, "faces": faces, "mx": mx, "spread": spread, "e": energy})
+        if len(out) % 2 == 0:
+            grays.append(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
         prev = gray
+    analyze.median = np.median(np.stack(grays[-120:]), axis=0).astype(np.uint8) if len(grays) >= 4 else None
     return out, small.shape[1], small.shape[0]
 
 
@@ -93,6 +98,58 @@ def find_facecam(samples, aw, ah):
     x = float(np.clip(cx - bw / 2, 0, aw - bw))
     y = float(np.clip(cy - bh * 0.42, 0, ah - bh))
     return x / aw, y / ah, bw / aw, bh / ah  # доли кадра
+
+
+def refine_facecam(med, face, aw, ah):
+    """Ищет настоящие границы окна вебки: на «среднем» кадре клипа (медиана по времени) у окна
+    камеры есть стабильная граница с игрой — длинная прямая линия. Возвращает доли кадра или None."""
+    import cv2
+
+    if med is None:
+        return None
+    fx, fy, fw = face   # центр лица и ширина лица (в пикселях уменьшенного кадра)
+    edges = cv2.dilate(cv2.Canny(med, 30, 90), np.ones((3, 3), np.uint8))
+    e = edges > 0
+
+    def best(lo, hi, axis, span):
+        lo, hi = int(max(0, lo)), int(min((aw if axis == "x" else ah) - 1, hi))
+        a, b = int(max(0, span[0])), int(min((ah if axis == "x" else aw), span[1]))
+        if hi - lo < 2 or b - a < 8:
+            return None, 0.0
+        if axis == "x":
+            sc = e[a:b, lo:hi].mean(axis=0)
+        else:
+            sc = e[lo:hi, a:b].mean(axis=1)
+        i = int(np.argmax(sc))
+        return lo + i, float(sc[i])
+
+    vspan = (fy - fw * 1.6, fy + fw * 2.2)
+    left, sl = best(fx - fw * 4.5, fx - fw * 0.9, "x", vspan)
+    right, sr = best(fx + fw * 0.9, fx + fw * 4.5, "x", vspan)
+    hspan = (fx - fw * 1.5, fx + fw * 1.5)
+    top, st_ = best(fy - fw * 3.0, fy - fw * 0.9, "y", hspan)
+    bot, sb = best(fy + fw * 0.9, fy + fw * 3.5, "y", hspan)
+    TH = 0.55   # линия должна идти почти по всей высоте/ширине окна
+    near = fw * 1.2
+    L = left if sl >= TH else (0 if fx - fw * 4.5 <= near else None)
+    R = right if sr >= TH else (aw if aw - (fx + fw * 4.5) <= near else None)
+    T = top if st_ >= TH else (0 if fy - fw * 3.0 <= near else None)
+    B = bot if sb >= TH else (ah if ah - (fy + fw * 3.5) <= near else None)
+    if None in (L, R, T, B):
+        return None
+    w, h = R - L, B - T
+    if not (fw * 2.0 <= w <= aw * 0.6 and fw * 1.6 <= h <= ah * 0.7 and 0.8 <= w / h <= 3.0):
+        return None
+    pad = 2   # внутрь от рамки, чтобы не тащить её край
+    L, T, R, B = L + pad, T + pad, R - pad, B - pad
+    return L / aw, T / ah, (R - L) / aw, (B - T) / ah
+
+
+def cam_height(cam, src_w, src_h) -> int:
+    """Высота блока вебки в вертикальном видео: по пропорциям окна, в разумных пределах."""
+    _, _, w, h = cam
+    ch = W * (h * src_h) / max(1.0, w * src_w)
+    return int(np.clip(round(ch / 2) * 2, CAM_MIN, CAM_MAX))
 
 
 def _director(clip: Path, duration: float, content: str):
@@ -147,6 +204,20 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
     """events — моменты килов внутри клипа (с): серия килов = тимфайт = широкий план."""
     samples, aw, ah = analyze(clip)
     cam = find_facecam(samples, aw, ah)
+    refined = False
+    if cam:
+        pts = [f for s_ in samples for f in s_["faces"] if f[2] < aw * 0.16]
+        arr = np.array(pts)
+        face = (float(np.median(arr[:, 0] + arr[:, 2] / 2)), float(np.median(arr[:, 1] + arr[:, 3] / 2)),
+                float(np.median(arr[:, 2])))
+        try:
+            r = refine_facecam(getattr(analyze, "median", None), face, aw, ah)
+        except Exception as e:
+            log.warning("refine_facecam: %s", e)
+            r = None
+        if r:
+            cam, refined = r, True
+    cam_h = cam_height(cam, src_w, src_h) if (cam and refined) else CAM_H
     bias = CENTER_BIAS.get(content, 0.4)
     ai = _director(clip, duration, content) if use_ai else None
 
@@ -183,7 +254,7 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
     # раскладка
     bar_h = BAR_H if (cam and bar) else 0
     if cam:
-        out_h = H - CAM_H - bar_h
+        out_h = H - cam_h - bar_h
         crop_h = src_h // 2 * 2
         crop_w = min(src_w, int(crop_h * W / out_h)) // 2 * 2
     else:
@@ -191,6 +262,13 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
         crop_h = src_h // 2 * 2
         crop_w = int(crop_h * 9 / 16) // 2 * 2
     max_x = src_w - crop_w
+    min_x = 0
+    if cam:   # окно вебки сбоку — сдвигаем игровое окно так, чтобы оно её не цепляло (если хватает места)
+        cx0, cx1 = cam[0] * src_w, (cam[0] + cam[2]) * src_w
+        if cx1 <= src_w * 0.5 and src_w - cx1 >= crop_w:
+            min_x = int(cx1) + 4
+        elif cx0 >= src_w * 0.5 and cx0 >= crop_w + 8:
+            max_x = int(cx0) - 4 - crop_w
 
     # сцены «широкий план» (минимум 1.5 с, чтобы не мигало)
     segs, cur = [], None
@@ -220,6 +298,8 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
             continue
         sel = [(t - a, x * src_w) for t, x in zip(ts, xs) if a <= t < b] or [(0.0, src_w / 2)]
         keys = _smooth([p[0] for p in sel], [p[1] for p in sel], crop_w, max_x)
+        if min_x:
+            keys = [(t, max(min_x, x)) for t, x in keys]
         shots.append({"s": a, "e": b, "kind": "track", "keys": keys})
     react = []
     if cam:  # всплески громкости = реакция стримера → зум камеры
@@ -236,7 +316,7 @@ def plan(clip: Path, duration: float, src_w: int, src_h: int, content: str = "ml
             pass
     layout = {"layout": "stream" if cam else "follow", "shots": shots, "crop_w": crop_w, "react": sorted(react),
               "crop_h": crop_h, "out_h": out_h, "ai": bool(ai), "bar_h": bar_h,
-              "cam_h": CAM_H if cam else 0}
+              "cam_h": cam_h if cam else 0, "cam_refined": refined}
     if cam:
         x, y, w, h = cam
         layout["cam"] = (int(x * src_w) // 2 * 2, int(y * src_h) // 2 * 2,
@@ -249,9 +329,22 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
 
     cwd = clip.parent
     cw, ch, oh = lay["crop_w"], lay["crop_h"], lay["out_h"]
+    cam_h = lay.get("cam_h") or CAM_H
     parts, labels = [], []
+    n = len(lay["shots"])
+    src = "[0:v]"
+    if lay["layout"] == "stream":
+        # окно вебки вырезано наверх отдельно — в игровой части закрашиваем его под цвет окружения,
+        # чтобы снизу не торчали обрывки камеры и рамки оверлея
+        x, y, w, h = lay["cam"]
+        m = int(min(src_w, src_h) * 0.015)
+        dx, dy = max(1, x - m), max(1, y - m)
+        dw, dh = min(w + 2 * m, src_w - dx - 1), min(h + 2 * m, src_h - dy - 1)
+        outs = "".join(f"[s{i}]" for i in range(n))
+        parts.append(f"[0:v]delogo=x={dx}:y={dy}:w={dw}:h={dh}" + (f",split={n}{outs}" if n > 1 else "[s0]"))
     for i, sh in enumerate(lay["shots"]):
-        trim = f"[0:v]trim=start={sh['s']:.3f}:end={sh['e']:.3f},setpts=PTS-STARTPTS"
+        src = f"[s{i}]" if lay["layout"] == "stream" else "[0:v]"
+        trim = f"{src}trim=start={sh['s']:.3f}:end={sh['e']:.3f},setpts=PTS-STARTPTS"
         if sh["kind"] == "track":
             parts.append(f"{trim},crop=w={cw}:h={ch}:x='{_x_expr(sh['keys'])}':y=0,"
                          f"scale={W}:{oh},setsar=1[g{i}]")
@@ -272,16 +365,16 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
         zoom = ""
         if lay.get("react"):
             zb = "+".join(f"exp(-pow((t-{t:.2f})/0.35,2))" for t in lay["react"])
-            zoom = (f"scale=w='trunc({W}*(1+0.18*({zb}))/2)*2':h='trunc({CAM_H}*(1+0.18*({zb}))/2)*2':"
-                    f"eval=frame,crop={W}:{CAM_H},")
+            zoom = (f"scale=w='trunc({W}*(1+0.18*({zb}))/2)*2':h='trunc({cam_h}*(1+0.18*({zb}))/2)*2':"
+                    f"eval=frame,crop={W}:{cam_h},")
         if bh:
-            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,{zoom}fps=30,"
-                      f"pad={W}:{CAM_H + bh}:0:0:black[cam];"
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{cam_h},setsar=1,{zoom}fps=30,"
+                      f"pad={W}:{cam_h + bh}:0:0:black[cam];"
                       f"[cam][game]vstack=inputs=2,ass={ass_name}[v]")
         else:
-            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{CAM_H},setsar=1,{zoom}fps=30[cam];"
+            graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{cam_h},setsar=1,{zoom}fps=30[cam];"
                       f"[cam][game]vstack=inputs=2,"
-                      f"drawbox=y={CAM_H - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
+                      f"drawbox=y={cam_h - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
     else:
         graph += f";\n[game]ass={ass_name}[v]"
     (cwd / "graph.txt").write_text(graph)
