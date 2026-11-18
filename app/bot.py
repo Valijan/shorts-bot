@@ -1122,8 +1122,20 @@ async def main():
     asyncio.create_task(janitor())
     asyncio.create_task(autostop(bot))
     try:   # команды в меню «/» — чтобы не набирать их руками
-        from aiogram.types import BotCommand
-        await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in MENU_COMMANDS])
+        from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
+        cmds = [BotCommand(command=c, description=d) for c, d in MENU_COMMANDS]
+        # Telegram показывает самый «узкий» набор: личные чаты и язык ru важнее общего.
+        # Если там остался старый список (например, только /start) — перезаписываем везде.
+        for scope in (BotCommandScopeDefault(), BotCommandScopeAllPrivateChats()):
+            for lang in (None, "ru", "en", "uz"):
+                await bot.set_my_commands(cmds, scope=scope, language_code=lang)
+        for u in cfg.ALLOWED_USERS:  # и для конкретного чата владельца
+            try:
+                from aiogram.types import BotCommandScopeChat
+                await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=u))
+            except Exception:
+                pass
+        log.info("Меню команд обновлено: %d команд", len(cmds))
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)
     log.info("Bot started (local API: %s, LLM: %s)", LOCAL, bool(cfg.ANTHROPIC_API_KEY))
