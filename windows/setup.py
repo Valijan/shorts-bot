@@ -15,7 +15,8 @@ from pathlib import Path
 
 DIR = Path.home() / "shorts-bot"
 REPO_ZIP = "https://codeload.github.com/Valijan/shorts-bot/zip/refs/heads/main"
-FFMPEG_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+FFMPEG_ZIPS = ["https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+               "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"]
 FONT = "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-{}.ttf"
 KEEP = {".env", "data", "venv", "ffmpeg", "fonts", "bot.log", ".git"}
 OWNER = "6749215117"
@@ -57,10 +58,19 @@ def main():
     if not (ff / "ffmpeg.exe").exists():
         step("Скачиваю ffmpeg (~100 МБ)…")
         ff.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(io.BytesIO(get(FFMPEG_ZIP))) as z:
-            for name in z.namelist():
-                if "/bin/" in name and name.endswith(".exe"):
-                    (ff / Path(name).name).write_bytes(z.read(name))
+        for url in FFMPEG_ZIPS:
+            try:
+                data = get(url, 900)
+            except Exception as e:
+                print("не скачалось, пробую другой источник:", e)
+                continue
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for name in z.namelist():
+                    if "/bin/" in name and name.endswith(".exe"):
+                        (ff / Path(name).name).write_bytes(z.read(name))
+            break
+        if not (ff / "ffmpeg.exe").exists():
+            raise RuntimeError("не удалось скачать ffmpeg")
 
     fonts = DIR / "fonts"
     fonts.mkdir(exist_ok=True)
