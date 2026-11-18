@@ -180,8 +180,8 @@ def _continuation(items) -> tuple[str | None, int]:
     return None, 1000
 
 
-def yt_actions(data: dict) -> tuple[list[tuple[float, str]], str | None, int]:
-    """Из ответа get_live_chat: ([(время, id автора)], следующий токен или None, пауза в мс)."""
+def yt_actions(data: dict) -> tuple[list[tuple[float, str, str]], str | None, int]:
+    """Из ответа get_live_chat: ([(время, id автора, текст)], следующий токен или None, пауза в мс)."""
     lcc = (data.get("continuationContents") or {}).get("liveChatContinuation")
     if not lcc:
         return [], None, 1000
@@ -199,7 +199,7 @@ def yt_actions(data: dict) -> tuple[list[tuple[float, str]], str | None, int]:
             ts = int(r.get("timestampUsec") or 0) / 1e6
         except ValueError:
             ts = 0.0
-        msgs.append((ts or time.time(), r.get("authorExternalChannelId") or name))
+        msgs.append((ts or time.time(), r.get("authorExternalChannelId") or name, text))
     cont, wait = _continuation(lcc.get("continuations"))
     return msgs, cont, wait
 
@@ -216,7 +216,7 @@ class Chat(threading.Thread):
     def __init__(self, channel: str, stop: threading.Event):
         super().__init__(daemon=True, name=f"chat-{channel}")
         self.channel, self.stop = channel, stop
-        self.msgs = collections.deque()   # (время, id пользователя)
+        self.msgs = collections.deque()   # (время, id пользователя, текст)
         self.lock = threading.Lock()
         self.connected = False
 
@@ -286,16 +286,21 @@ class Chat(threading.Thread):
             if login in BOTS or text.startswith("!"):
                 return None  # боты и команды вроде !discord — не реакция зрителей
             with self.lock:
-                self.msgs.append((now or time.time(), tags.get("user-id") or login))
+                self.msgs.append((now or time.time(), tags.get("user-id") or login, text))
         return None
 
     def window(self, t_end: float, win: float = WIN) -> tuple[int, int]:
         """(сообщений, разных людей) за последние win секунд."""
         with self.lock:
-            while self.msgs and self.msgs[0][0] < t_end - 30:
+            while self.msgs and self.msgs[0][0] < t_end - 150:   # текст держим дольше — для разбора момента
                 self.msgs.popleft()
-            users = [u for ts, u in self.msgs if t_end - win < ts <= t_end]
+            users = [m[1] for m in self.msgs if t_end - win < m[0] <= t_end]
         return len(users), len(set(users))
+
+    def texts(self, a: float, b: float) -> list[str]:
+        """Тексты сообщений за отрезок [a, b] (для понимания, что произошло)."""
+        with self.lock:
+            return [m[2] for m in self.msgs if a <= m[0] <= b and len(m) > 2]
 
 
 class YTChat(Chat):
@@ -324,7 +329,7 @@ class YTChat(Chat):
                 raise ConnectionError("чат закрылся")
             now = time.time()
             with self.lock:
-                self.msgs.extend((min(ts, now), u) for ts, u in msgs)
+                self.msgs.extend((min(ts, now), u, tx) for ts, u, tx in msgs)
             self.stop.wait(min(max(wait / 1000, 1.0), 3.0))
 
 
@@ -574,6 +579,7 @@ class LiveSession:
         self.rec = Recorder(self.key, self.dir, self.stop_ev, url_fn, self._cmd, self._state, src_cmd)
         self.pending: list[dict] = []
         self.clips = 0
+        self.skipped = 0              # скучные всплески (подписки, розыгрыши, голосования)
         self.started = time.time()
         self.live_since = None        # когда пошёл эфир (для табло)
         self.last_spike = None        # когда был последний всплеск
@@ -645,8 +651,14 @@ class LiveSession:
                 msgs, users = self.chat.window(now)
                 c = self.det.step(now, msgs, users, armed=self.rec.live)
                 if c:
-                    self.pending.append(c)
+                    from .chatmood import classify
+                    c["mood"] = classify(self.chat.texts(c["start"], now))
                     self.last_spike = now
+                    if c["mood"]["skip"]:
+                        self.skipped += 1
+                        log.info("live %s: скучный всплеск пропущен (%s)", self.key, c["mood"])
+                    else:
+                        self.pending.append(c)
                 self._flush(now)
             except Exception:
                 log.exception("live loop %s", self.channel)
@@ -692,8 +704,9 @@ class LiveSession:
             spike = "⚡ всплесков пока не было"
         wait = f" · ждут видео: {len(self.pending)}" if self.pending else ""
         back = f"\n⏪ {self.back.state}" if self.back and self.back.state else ""
+        skip = f" · пропущено скучных: {self.skipped}" if self.skipped else ""
         return (f"<b>{self.label}</b>: {rec}, {chat}\n{level}\n{spike}{wait}\n"
-                f"✂️ клипов готово: {self.clips}{back}")
+                f"✂️ клипов готово: {self.clips}{skip}{back}")
 
 
 def _hms(t: float) -> str:

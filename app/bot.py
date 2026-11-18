@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, live, night, pipeline
+from . import ai, chatmood, fx, live, night, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -741,10 +741,13 @@ async def _live_clip(bot: Bot, uid: int, chat: int, sess, path: Path, info: dict
         head = f"⏪ <b>{ch}</b>: момент на {fmt_hms(info['at'])} эфира"
     else:
         head = f"🔴 <b>{ch}</b>: всплеск в чате"
+    mood = chatmood.describe(info.get("mood"))
     status = await bot.send_message(chat, f"{head} — {info['users']} чел. за 10 с "
-                                          f"(обычно ~{info['norm']:.0f}). Монтирую клип…")
+                                          f"(обычно ~{info['norm']:.0f})."
+                                          + (f"\n{html.escape(mood)}" if mood else "") + "\nМонтирую клип…")
     await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
-                     "status_id": status.message_id, "channel": ch, "live_key": sess.key})
+                     "status_id": status.message_id, "channel": ch, "live_key": sess.key,
+                     "mood": info.get("mood")})
 
 
 # ---------- Ночной режим: несколько стримеров по очереди ----------
@@ -867,10 +870,13 @@ async def _night_clip(bot: Bot, uid: int, chat: int, login: str, path: Path, inf
     workdir.mkdir(parents=True, exist_ok=True)
     src = workdir / "source.mp4"
     shutil.move(str(path), src)
+    mood = chatmood.describe(info.get("mood"))
     status = await bot.send_message(chat, f"🌙 <b>{login}</b>: момент на {fmt_hms(info['at'])} эфира — "
-                                          f"{info['users']} чел. за 10 с (обычно ~{info['norm']:.0f}). В очереди на монтаж…")
+                                          f"{info['users']} чел. за 10 с (обычно ~{info['norm']:.0f})."
+                                          + (f"\n{html.escape(mood)}" if mood else "") + "\nВ очереди на монтаж…")
     await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
-                     "status_id": status.message_id, "channel": f"Twitch {login}", "live_key": "night"})
+                     "status_id": status.message_id, "channel": f"Twitch {login}", "live_key": "night",
+                     "mood": info.get("mood")})
 
 
 @router.callback_query(F.data == "noop")
@@ -1360,8 +1366,11 @@ async def worker(bot: Bot):
                 clips = await asyncio.to_thread(pipeline.choose, A, {**st, "ranges": [(0.0, A["dur"])]}, 1)
                 if not clips:
                     raise RuntimeError("Кусок эфира оказался пустым")
+                md = job.get("mood") or {}
                 for c in clips:
-                    c["text"] = f"🔴 Эфир {job['channel']}"
+                    name = job["channel"].split(" ", 1)[-1]
+                    c["text"] = f"{md['emoji']} {md['label']} · {name}" if md.get("kind") else f"🔴 Эфир {job['channel']}"
+                    c["mood"] = md
                 await asyncio.to_thread(pipeline.render, src, workdir, st, A, clips, progress,
                                         on_clip_factory(st, A), cancelled)
                 await set_status(f"✅ Клип из эфира <b>{job['channel']}</b> готов.", force=True)

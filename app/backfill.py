@@ -83,8 +83,8 @@ def current_vod(login: str) -> dict | None:
     return pick_vod(user or {})
 
 
-def parse_comments(video: dict) -> tuple[list[tuple[float, str, str]], float]:
-    """([(секунда записи, id сообщения, автор)], секунда последнего сообщения в ответе)."""
+def parse_comments(video: dict) -> tuple[list[tuple[float, str, str, str]], float]:
+    """([(секунда записи, id сообщения, автор, текст)], секунда последнего сообщения в ответе)."""
     out, last = [], -1.0
     for e in ((video or {}).get("comments") or {}).get("edges") or []:
         n = e.get("node") or {}
@@ -95,12 +95,12 @@ def parse_comments(video: dict) -> tuple[list[tuple[float, str, str]], float]:
         text = "".join(f.get("text") or "" for f in (n.get("message") or {}).get("fragments") or [])
         if login in BOTS or text.startswith("!"):
             continue  # боты и команды — не реакция зрителей
-        out.append((t, str(n.get("id")), str(c.get("id") or login or n.get("id"))))
+        out.append((t, str(n.get("id")), str(c.get("id") or login or n.get("id")), text))
     return out, last
 
 
-def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=None) -> list[tuple[float, str]]:
-    """Весь чат записи от начала до секунды upto: [(секунда, автор)]."""
+def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=None) -> list[tuple]:
+    """Весь чат записи от начала до секунды upto: [(секунда, автор, текст)]."""
     fetch = fetch or (lambda off: _gql(Q_CHAT, {"id": vid, "o": int(off)}).get("video") or {})
     out, seen, off, errors = [], set(), 0.0, 0
     while off < upto and not (stop and stop.is_set()):
@@ -113,10 +113,10 @@ def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=N
                 raise RuntimeError(f"Twitch не отдаёт чат записи: {e}") from None
             time.sleep(2 * errors)
             continue
-        for t, mid, user in msgs:
+        for t, mid, user, text in msgs:
             if mid not in seen and t <= upto:
                 seen.add(mid)
-                out.append((t, user))
+                out.append((t, user, text))
         if last < 0:
             off += 60                      # тут тишина — смотрим дальше
         elif int(last) <= int(off):
@@ -126,8 +126,11 @@ def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=N
     return sorted(out)
 
 
-def find_moments(msgs: list[tuple[float, str]], upto: float, **det) -> list[dict]:
-    """Тот же детектор, что в живом режиме, но по сохранённому чату. Время — секунды записи."""
+def find_moments(msgs: list[tuple], upto: float, **det) -> list[dict]:
+    """Тот же детектор, что в живом режиме, но по сохранённому чату. Время — секунды записи.
+    У каждого момента — mood: что писал чат (смешно, хайп, фейл…); скучные всплески отброшены."""
+    import bisect
+    from .chatmood import classify
     d = Detector(**det)
     out, lo, hi, t = [], 0, 0, SEG
     while t <= upto:
@@ -135,18 +138,26 @@ def find_moments(msgs: list[tuple[float, str]], upto: float, **det) -> list[dict
             hi += 1
         while lo < hi and msgs[lo][0] <= t - WIN:
             lo += 1
-        c = d.step(t, hi - lo, len({u for _, u in msgs[lo:hi]}))
+        c = d.step(t, hi - lo, len({m[1] for m in msgs[lo:hi]}))
         if c and c["end"] <= upto:
             out.append(c)
         t += SEG
-    return out
+    times = [m[0] for m in msgs]
+    keep = []
+    for c in out:
+        a, b = bisect.bisect_left(times, c["start"]), bisect.bisect_right(times, c["end"] + 5)
+        c["mood"] = classify([m[2] for m in msgs[a:b] if len(m) > 2])
+        if not c["mood"]["skip"]:
+            keep.append(c)
+    return keep
 
 
 def strongest(moments: list[dict], limit: int) -> list[dict]:
     """Если моментов слишком много — оставляем самые сильные (во сколько раз выше нормы), по порядку."""
     if limit <= 0 or len(moments) <= limit:
         return moments
-    top = sorted(moments, key=lambda m: m["peak"] / max(1.0, m["norm"]), reverse=True)[:limit]
+    from .chatmood import rank
+    top = sorted(moments, key=rank, reverse=True)[:limit]
     return sorted(top, key=lambda m: m["start"])
 
 
