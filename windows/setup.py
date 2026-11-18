@@ -73,6 +73,7 @@ def main():
                 print("шрифт не скачался:", e)
 
     env = DIR / ".env"
+    quiet = env.exists()   # настройки уже лежат (их положил Claude) — ничего не спрашиваем
     if not env.exists():
         step("Настройка бота")
         token = ""
@@ -101,7 +102,7 @@ def main():
     vbs.write_text(f'CreateObject("WScript.Shell").Run """{start}""", 0, False\r\n', encoding="utf-8")
     step("Автозапуск включён: бот будет стартовать вместе с Windows (без окон).")
 
-    ans = input("\nОтключить спящий режим, пока ПК от сети? Иначе бот уснёт вместе с ПК. [Д/н]: ").strip().lower()
+    ans = "" if quiet else input("\nОтключить спящий режим, пока ПК от сети? Иначе бот уснёт вместе с ПК. [Д/н]: ").strip().lower()
     if ans in ("", "д", "да", "y", "yes"):
         for k in ("standby-timeout-ac", "hibernate-timeout-ac"):
             subprocess.run(["powercfg", "/change", k, "0"])
