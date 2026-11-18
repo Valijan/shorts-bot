@@ -19,7 +19,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
-from . import ai, fx, live, pipeline
+from . import ai, fx, live, night, pipeline
 from . import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -301,6 +301,7 @@ HELP = (
     "• <code>1:20-2:05</code> — вырезать именно этот кусок (можно несколько через запятую)\n"
     "• <code>топ</code> — один шортс «Топ-5 моментов»\n\n"
     "🔴 <code>/live канал</code> — резать эфир Twitch или YouTube прямо во время стрима по всплескам чата\n"
+    "🌙 <code>/night ник1 ник2 ник3</code> — на ночь: записи эфиров нескольких стримеров по очереди\n"
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
@@ -310,6 +311,7 @@ HELP = (
 
 MENU_COMMANDS = [
     ("start", "Справка и текущие настройки"), ("live", "Резать эфир Twitch/YouTube: /live канал"),
+    ("night", "Ночью: несколько стримеров по очереди"),
     ("settings", "Настройки нарезки"), ("queue", "Очередь задач"), ("cancel", "Отменить текущую задачу"),
     ("campaigns", "Кампании блогеров"), ("addcampaign", "Добавить кампанию"), ("music", "Фоновая музыка"),
     ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Остановить всю работу"),
@@ -481,6 +483,9 @@ async def cancel(m: Message):
     if running:
         STATE["cancel"] = True
     lives = [x for x in (stop_live(k) for k in list(LIVE)) if x]
+    nr = stop_night()
+    if nr:
+        lives.append(nr)
     parts = (["Останавливаю текущий монтаж."] if running else []) + \
             ([f"Убрал из очереди: {removed}."] if removed else []) + \
             ([f"Живой режим выключен: {'; '.join(lives)}."] if lives else [])
@@ -740,6 +745,132 @@ async def _live_clip(bot: Bot, uid: int, chat: int, sess, path: Path, info: dict
                                           f"(обычно ~{info['norm']:.0f}). Монтирую клип…")
     await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
                      "status_id": status.message_id, "channel": ch, "live_key": sess.key})
+
+
+# ---------- Ночной режим: несколько стримеров по очереди ----------
+
+NIGHT: dict = {"run": None}
+NIGHT_HELP = (
+    "🌙 <b>Ночной режим</b> — несколько стримеров Twitch по очереди.\n"
+    "Бот берёт запись последнего (или идущего) эфира каждого стримера, находит по чату самые яркие "
+    "моменты и монтирует их. Пока клипы одного стримера не готовы — к следующему не переходит. "
+    "Стримеры могут быть уже офлайн: записи хранятся на Twitch.\n\n"
+    "<code>/night buster shadowkekw evelone2004</code> — по 10 клипов с каждого\n"
+    "<code>/night 15 buster shadowkekw</code> — по 15 клипов\n"
+    "<code>/night</code> — что сейчас происходит · <code>/night stop</code> — остановить")
+
+
+def stop_night() -> str:
+    run = NIGHT["run"]
+    if not run or not run.is_alive():
+        return ""
+    run.stop()
+    kept, dropped = [], 0
+    while not queue.empty():
+        j = queue.get_nowait()
+        queue.task_done()
+        if j.get("live_key") == "night":
+            dropped += 1
+            shutil.rmtree(j.get("workdir", ""), ignore_errors=True)
+            DROPPED.append((j["chat_id"], j["status_id"]))
+        else:
+            kept.append(j)
+    for j in kept:
+        queue.put_nowait(j)
+    job = STATE.get("job")
+    if job and job.get("live_key") == "night":
+        STATE["cancel"] = True
+    return f"ночной разбор (клипов: {run.clips}" + (f", убрал из очереди: {dropped}" if dropped else "") + ")"
+
+
+@router.message(Command("night"))
+async def night_cmd(m: Message, bot: Bot):
+    words = (m.text or "").split()[1:]
+    run = NIGHT["run"]
+    if not words:
+        return await m.answer(run.status() if run and run.is_alive() else NIGHT_HELP)
+    if words[0].lower() in ("stop", "стоп", "off"):
+        res = stop_night()
+        await m.answer("⏹ Остановил " + res if res else "Ночной режим и так выключен.")
+        return await mark_dropped(bot)
+    if run and run.is_alive():
+        return await m.answer("Ночной разбор уже идёт:\n\n" + run.status() + "\n\nОстановить: /night stop")
+    per, logins, bad = cfg.NIGHT_CLIPS, [], []
+    for w in words:
+        if w.isdigit():
+            per = max(1, min(50, int(w)))
+            continue
+        src = live.parse_source(w.strip(","))
+        if src and src["platform"] == "twitch":
+            if src["key"] not in logins:
+                logins.append(src["key"])
+        else:
+            bad.append(w)
+    if bad:
+        await m.answer("Пропускаю (ночной режим — только Twitch): " + html.escape(", ".join(bad)))
+    if not logins:
+        return await m.answer(NIGHT_HELP)
+    loop = asyncio.get_running_loop()
+    uid, chat = m.from_user.id, m.chat.id
+
+    def on_clip(path, info, login):
+        asyncio.run_coroutine_threadsafe(_night_clip(bot, uid, chat, login, path, info), loop)
+
+    def on_event(text):
+        asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
+
+    run = night.NightRun(logins, per, cfg.DATA_DIR / "night", on_clip, on_event, queue.qsize)
+    NIGHT["run"] = run
+    run.start()
+    await m.answer(f"🌙 Ночной разбор: {', '.join(logins)} — по {per} клипов, по очереди.\n"
+                   "Табло ниже обновляется само. Остановить: /night stop")
+    dash = await bot.send_message(chat, night_dash_text(run))
+    try:
+        await bot.pin_chat_message(chat, dash.message_id, disable_notification=True)
+    except Exception:
+        pass
+    asyncio.create_task(_night_dash(bot, chat, run, dash.message_id))
+
+
+def night_dash_text(run) -> str:
+    now = time.strftime("%H:%M:%S", time.gmtime(time.time() + cfg.TZ_OFFSET * 3600))
+    return f"{run.status()}\n\n{work_line()}\n\n<i>обновлено {now}</i>"
+
+
+async def _night_dash(bot: Bot, chat: int, run, mid: int):
+    last = ""
+    while run.is_alive():
+        text = night_dash_text(run)
+        if text != last:
+            try:
+                await bot.edit_message_text(text, chat_id=chat, message_id=mid)
+                last = text
+            except TelegramBadRequest as e:
+                if "not found" in str(e).lower():
+                    break
+            except Exception:
+                log.exception("night dash")
+        await asyncio.sleep(cfg.LIVE_DASH_EVERY)
+    try:
+        await bot.edit_message_text(run.status() + "\n\n⏹ Ночной разбор завершён.", chat_id=chat, message_id=mid)
+        await bot.unpin_chat_message(chat, message_id=mid)
+    except Exception:
+        pass
+
+
+async def _night_clip(bot: Bot, uid: int, chat: int, login: str, path: Path, info: dict):
+    run = NIGHT["run"]
+    if not run or run.stop_ev.is_set():
+        Path(path).unlink(missing_ok=True)
+        return
+    workdir = cfg.DATA_DIR / "jobs" / uuid.uuid4().hex[:10]
+    workdir.mkdir(parents=True, exist_ok=True)
+    src = workdir / "source.mp4"
+    shutil.move(str(path), src)
+    status = await bot.send_message(chat, f"🌙 <b>{login}</b>: момент на {fmt_hms(info['at'])} эфира — "
+                                          f"{info['users']} чел. за 10 с (обычно ~{info['norm']:.0f}). В очереди на монтаж…")
+    await queue.put({"type": "live", "src": src, "workdir": workdir, "chat_id": chat, "uid": uid,
+                     "status_id": status.message_id, "channel": f"Twitch {login}", "live_key": "night"})
 
 
 @router.callback_query(F.data == "noop")

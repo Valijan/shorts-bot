@@ -60,3 +60,4 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 TZ_OFFSET = _float("TZ_OFFSET", 5)          # часовой пояс для табло (Ташкент UTC+5)
 LIVE_DASH_EVERY = _int("LIVE_DASH_EVERY", 15)  # как часто обновлять табло живого режима, с
 FONTS_DIR = os.getenv("FONTS_DIR", "")      # своя папка со шрифтами субтитров (Windows: шрифты рядом с ботом)
+NIGHT_CLIPS = _int("NIGHT_CLIPS", 10)          # клипов с каждого стримера в ночном режиме
