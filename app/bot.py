@@ -304,7 +304,7 @@ HELP = (
     "/settings — настройки · /watermark @ник — ник на видео\n"
     "/campaigns — 💰 кампании блогеров · /addcampaign — добавить\n"
     "/music — фоновая музыка · /queue — очередь · /cancel — отмена\n"
-    "/stop — выключить сервер сейчас · /id — твой ID"
+    "/stop — остановить всю работу · /update — обновить бота · /log — лог · /id — твой ID"
 )
 
 
@@ -312,7 +312,8 @@ MENU_COMMANDS = [
     ("start", "Справка и текущие настройки"), ("live", "Резать эфир Twitch/YouTube: /live канал"),
     ("settings", "Настройки нарезки"), ("queue", "Очередь задач"), ("cancel", "Отменить текущую задачу"),
     ("campaigns", "Кампании блогеров"), ("addcampaign", "Добавить кампанию"), ("music", "Фоновая музыка"),
-    ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Выключить сервер сейчас"),
+    ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Остановить всю работу"),
+    ("update", "Обновить бота и перезапустить"), ("log", "Последние строки лога"),
     ("id", "Мой Telegram ID"), ("help", "Справка"),
 ]
 
@@ -489,10 +490,40 @@ async def cancel(m: Message):
 
 @router.message(Command("stop"))
 async def stop_now(m: Message):
+    if not os.getenv("RUNPOD_POD_ID"):
+        # домашний ПК: компьютер не выключаем — останавливаем всю работу, бот остаётся на связи
+        return await cancel(m)
     await m.answer("⏸ Выключаю сервер… Включить снова: RunPod → Start.")
     ok, msg = await asyncio.to_thread(stop_pod)
     if not ok:
         await m.answer(f"Не получилось: {msg}")
+
+
+SUPERVISED = os.getenv("SB_SUPERVISED") == "1"   # запущен из start_bot.bat: после выхода он обновит и поднимет бота
+
+
+@router.message(Command("update", "restart"))
+async def update_cmd(m: Message):
+    if not SUPERVISED:
+        return await m.answer("Здесь бот запущен без автоперезапуска — обновление командой недоступно.")
+    if STATE["busy"] or LIVE:
+        await m.answer("⚠️ Сейчас идёт работа — она прервётся. Обновляю и перезапускаю…")
+    else:
+        await m.answer("🔄 Скачиваю свежую версию и перезапускаюсь. Через 1–2 минуты пришлю «бот запущен».")
+    for k in list(LIVE):
+        stop_live(k)
+    await asyncio.sleep(1)
+    os._exit(0)
+
+
+@router.message(Command("log"))
+async def log_cmd(m: Message):
+    path = Path(os.getenv("SB_LOG", "")) if os.getenv("SB_LOG") else None
+    if not path or not path.exists():
+        return await m.answer("Файла лога нет.")
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    text = "\n".join(lines)[-3500:]
+    await m.answer(f"<pre>{html.escape(text) or 'пусто'}</pre>")
 
 
 # ---------- Живой режим ----------
@@ -1277,9 +1308,21 @@ async def _send_previews(bot, chat, src, clips):
         await bot.send_message(chat, rest)
 
 
+_LOCK = None
+
+
 async def main():
+    global _LOCK
     if not cfg.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан в .env")
+    if SUPERVISED:   # на ПК бот должен быть один: вторая копия сразу выходит (start_bot.bat видит код 5)
+        import socket
+        _LOCK = socket.socket()
+        try:
+            _LOCK.bind(("127.0.0.1", 47831))
+        except OSError:
+            log.warning("бот уже запущен — выхожу")
+            raise SystemExit(5)
     session = None
     if LOCAL:
         session = AiohttpSession(api=TelegramAPIServer.from_base(cfg.BOT_API_URL, is_local=True),
@@ -1311,6 +1354,12 @@ async def main():
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)
     log.info("Bot started (local API: %s, LLM: %s)", LOCAL, bool(cfg.ANTHROPIC_API_KEY))
+    if SUPERVISED:   # домашний ПК: сообщаем, что бот снова в строю (после перезагрузки или /update)
+        for u in cfg.ALLOWED_USERS:
+            try:
+                await bot.send_message(u, "✅ Бот запущен на ПК и готов к работе.")
+            except Exception:
+                pass
     await dp.start_polling(bot)
 
 

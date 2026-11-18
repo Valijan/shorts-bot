@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config as cfg
-from .media import H, W, run
+from .media import H, W, ass_filter, run
 from .reframe import _detectors, _smooth
 
 log = logging.getLogger(__name__)
@@ -395,13 +395,13 @@ def render(clip: Path, out: Path, ass_name: str, lay: dict, src_w: int, src_h: i
         if bh:
             graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{cam_h},setsar=1,{zoom}fps=30,"
                       f"pad={W}:{cam_h + bh}:0:0:black[cam];"
-                      f"[cam][game]vstack=inputs=2,ass={ass_name}[v]")
+                      f"[cam][game]vstack=inputs=2,{ass_filter(ass_name)}[v]")
         else:
             graph += (f";\n[0:v]crop={w}:{h}:{x}:{y},scale={W}:{cam_h},setsar=1,{zoom}fps=30[cam];"
                       f"[cam][game]vstack=inputs=2,"
-                      f"drawbox=y={cam_h - 3}:w=iw:h=6:color=white@0.9:t=fill,ass={ass_name}[v]")
+                      f"drawbox=y={cam_h - 3}:w=iw:h=6:color=white@0.9:t=fill,{ass_filter(ass_name)}[v]")
     else:
-        graph += f";\n[game]ass={ass_name}[v]"
+        graph += f";\n[game]{ass_filter(ass_name)}[v]"
     (cwd / "graph.txt").write_text(graph)
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",

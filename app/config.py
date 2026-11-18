@@ -59,3 +59,4 @@ LIVE_BACKFILL_MAX = _int("LIVE_BACKFILL_MAX", 30)       # максимум кл�
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TZ_OFFSET = _float("TZ_OFFSET", 5)          # часовой пояс для табло (Ташкент UTC+5)
 LIVE_DASH_EVERY = _int("LIVE_DASH_EVERY", 15)  # как часто обновлять табло живого режима, с
+FONTS_DIR = os.getenv("FONTS_DIR", "")      # своя папка со шрифтами субтитров (Windows: шрифты рядом с ботом)

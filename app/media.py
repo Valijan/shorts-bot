@@ -5,8 +5,16 @@ from pathlib import Path
 
 import numpy as np
 
+from . import config as cfg
+
 W, H = 1080, 1920
 
+
+
+def ass_filter(name: str) -> str:
+    """Фильтр субтитров ffmpeg; если задана своя папка шрифтов — libass берёт шрифты оттуда."""
+    fd = cfg.FONTS_DIR
+    return f"ass={name}" + (f":fontsdir='{Path(fd).as_posix()}'" if fd else "")
 
 def run(cmd, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -146,7 +154,7 @@ def render(clip: Path, out: Path, ass_name: str, mode: str, src_w: int, src_h: i
         )
         sendcmd = "sendcmd=f=cmds.txt," if len(shots) > 1 else ""
         vf = (f"{sendcmd}crop@fc=w={crop_w}:h={src_h // 2 * 2}:x={shots[0][1]}:y=0,"
-              f"scale={W}:{H},setsar=1,ass={ass_name}")
+              f"scale={W}:{H},setsar=1,{ass_filter(ass_name)}")
         args = ["-vf", vf]
     else:
         fc = (
@@ -154,7 +162,7 @@ def render(clip: Path, out: Path, ass_name: str, mode: str, src_w: int, src_h: i
             f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,"
             f"gblur=sigma=12,eq=brightness=-0.12,scale={W}:{H}[bg];"
             f"[b]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,ass={ass_name}[v]"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,{ass_filter(ass_name)}[v]"
         )
         args = ["-filter_complex", fc, "-map", "[v]", "-map", "0:a:0?"]
     run([

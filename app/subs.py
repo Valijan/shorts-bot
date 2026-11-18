@@ -1,5 +1,6 @@
 """Генерация субтитров ASS в стиле Shorts: крупно, 2–3 слова, текущее слово подсвечено."""
 import re
+from pathlib import Path
 
 from . import config as cfg
 
@@ -36,7 +37,8 @@ def font() -> str:
             out = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True).stdout
         except Exception:
             out = ""
-        _FONT = "Montserrat Black" if "Montserrat Black" in out else cfg.SUB_FONT
+        own = cfg.FONTS_DIR and (Path(cfg.FONTS_DIR) / "Montserrat-Black.ttf").exists()
+        _FONT = "Montserrat Black" if ("Montserrat Black" in out or own) else cfg.SUB_FONT
     return _FONT
 
 

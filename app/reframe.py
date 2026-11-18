@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .media import H, W, run
+from .media import H, W, ass_filter, run
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
 FPS_SAMPLE = 5          # анализ кадров в секунду
@@ -244,7 +244,7 @@ def render(clip: Path, out: Path, ass_name: str, shots: list[dict], src_w: int, 
                 f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,setsar=1[v{i}]")
         labels.append(f"[v{i}]")
     graph = ";\n".join(parts)
-    graph += f";\n{''.join(labels)}concat=n={len(labels)}:v=1:a=0,fps=30,ass={ass_name}[v]"
+    graph += f";\n{''.join(labels)}concat=n={len(labels)}:v=1:a=0,fps=30,{ass_filter(ass_name)}[v]"
     (cwd / "graph.txt").write_text(graph)
     run([
         "ffmpeg", "-y", "-v", "error", "-i", clip.name, "-filter_complex_script", "graph.txt",
@@ -268,7 +268,7 @@ def render_game(clip: Path, out: Path, ass_name: str, src_w: int, src_h: int):
         f"[a]scale={W}:{top_h},setsar=1[top];"
         f"[b]crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={W}:{bot_h},setsar=1[bot];"
         f"[top][bot]vstack=inputs=2,drawbox=y={top_h - 3}:w=iw:h=6:color=white@0.85:t=fill,"
-        f"fps=30,ass={ass_name}[v]"
+        f"fps=30,{ass_filter(ass_name)}[v]"
     )
     (cwd / "graph.txt").write_text(graph)
     run([
