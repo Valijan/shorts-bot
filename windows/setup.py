@@ -73,6 +73,10 @@ def main():
                 print("шрифт не скачался:", e)
 
     env = DIR / ".env"
+    pre = Path.home() / ".config" / "shorts-bot.env"   # настройки, заранее положенные Claude
+    if not env.exists() and pre.exists():
+        env.write_bytes(pre.read_bytes())
+        pre.unlink()
     quiet = env.exists()   # настройки уже лежат (их положил Claude) — ничего не спрашиваем
     if not env.exists():
         step("Настройка бота")
