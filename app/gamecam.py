@@ -60,6 +60,8 @@ def analyze(clip: Path):
             _, res = yunet.detect(small)
             if res is not None:
                 faces = [(float(r[0]), float(r[1]), float(r[2]), float(r[3])) for r in res if r[-1] > 0.7]
+            if not faces and len(out) % 2 == 0:
+                faces = _corner_faces(yunet, frame, sc)
         mx = spread = None
         energy = 0.0
         if prev is not None:
@@ -79,15 +81,38 @@ def analyze(clip: Path):
     return out, small.shape[1], small.shape[0]
 
 
+def _corner_faces(yunet, frame, sc):
+    """Мелкая вебка в углу: на уменьшенном кадре лицо слишком маленькое для детектора —
+    смотрим углы в полном разрешении (увеличенные). Координаты — в масштабе уменьшенного кадра."""
+    import cv2
+
+    fh, fw = frame.shape[:2]
+    cw, ch = int(fw * 0.4), int(fh * 0.45)
+    found = []
+    for x0, y0 in ((0, 0), (fw - cw, 0), (0, fh - ch), (fw - cw, fh - ch)):
+        crop = frame[y0:y0 + ch, x0:x0 + cw]
+        k = AW / cw
+        img = cv2.resize(crop, (AW, int(ch * k)))
+        yunet.setInputSize((img.shape[1], img.shape[0]))
+        _, res = yunet.detect(img)
+        if res is None:
+            continue
+        for r in res:
+            if r[-1] > 0.75:
+                fx, fy = x0 + r[0] / k, y0 + r[1] / k
+                found.append((float(fx * sc), float(fy * sc), float(r[2] / k * sc), float(r[3] / k * sc)))
+    return found
+
+
 def find_facecam(samples, aw, ah):
     """Веб-камера = маленькое лицо, стабильно стоящее в одном месте у края экрана."""
     pts = [f for s in samples for f in s["faces"] if f[2] < aw * 0.16]
-    if len(samples) < 8 or len(pts) < len(samples) * 0.5:
+    if len(samples) < 8 or len(pts) < len(samples) * 0.35:
         return None
     arr = np.array(pts)
     cx, cy = np.median(arr[:, 0] + arr[:, 2] / 2), np.median(arr[:, 1] + arr[:, 3] / 2)
     near = [p for p in pts if abs(p[0] + p[2] / 2 - cx) < aw * 0.05 and abs(p[1] + p[3] / 2 - cy) < ah * 0.07]
-    if len(near) < len(samples) * 0.5:
+    if len(near) < len(samples) * 0.35:
         return None
     edge = cx < aw * 0.33 or cx > aw * 0.67 or cy < ah * 0.3 or cy > ah * 0.7
     if not edge:
