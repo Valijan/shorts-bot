@@ -99,11 +99,10 @@ def parse_comments(video: dict) -> tuple[list[tuple[float, str, str, str]], floa
     return out, last
 
 
-def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=None) -> list[tuple]:
-    """Весь чат записи от начала до секунды upto: [(секунда, автор, текст)]."""
-    fetch = fetch or (lambda off: _gql(Q_CHAT, {"id": vid, "o": int(off)}).get("video") or {})
-    out, seen, off, errors = [], set(), 0.0, 0
-    while off < upto and not (stop and stop.is_set()):
+def _vod_range(fetch, a: float, b: float, stop, report) -> list[tuple]:
+    """Чат записи на отрезке [a, b): [(секунда, id, автор, текст)]."""
+    out, off, errors = [], a, 0
+    while off < b and not (stop and stop.is_set()):
         try:
             msgs, last = parse_comments(fetch(off))
             errors = 0
@@ -113,16 +112,45 @@ def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=N
                 raise RuntimeError(f"Twitch не отдаёт чат записи: {e}") from None
             time.sleep(2 * errors)
             continue
-        for t, mid, user, text in msgs:
-            if mid not in seen and t <= upto:
-                seen.add(mid)
-                out.append((t, user, text))
+        out.extend(m for m in msgs if a <= m[0] < b)
         if last < 0:
             off += 60                      # тут тишина — смотрим дальше
         elif int(last) <= int(off):
             off = int(off) + 1             # вся страница в одной секунде
         else:
             off = last
+        report(min(off, b) - a)
+    return out
+
+
+def vod_chat(vid: str, upto: float, stop: threading.Event | None = None, fetch=None,
+             progress=None, workers: int = 8) -> list[tuple]:
+    """Весь чат записи от начала до секунды upto: [(секунда, автор, текст)].
+    Twitch отдаёт чат маленькими страницами, поэтому запись делим на куски и читаем их
+    параллельно — для эфира в несколько часов это минуты вместо получаса."""
+    from concurrent.futures import ThreadPoolExecutor
+    fetch = fetch or (lambda off: _gql(Q_CHAT, {"id": vid, "o": int(off)}).get("video") or {})
+    n = max(1, min(workers, int(upto // 300)))
+    edges = [upto * i / n for i in range(n)] + [upto + 1]
+    done = [0.0] * n
+    lock = threading.Lock()
+
+    def part(i):
+        def report(x):
+            with lock:
+                done[i] = x
+                if progress:
+                    progress(min(1.0, sum(done) / max(1.0, upto)))
+        return _vod_range(fetch, edges[i], edges[i + 1], stop, report)
+
+    with ThreadPoolExecutor(n) as ex:
+        parts = list(ex.map(part, range(n)))
+    out, seen = [], set()
+    for chunk in parts:
+        for t, mid, user, text in chunk:
+            if mid not in seen and t <= upto:
+                seen.add(mid)
+                out.append((t, user, text))
     return sorted(out)
 
 
@@ -241,7 +269,9 @@ class Backfill(threading.Thread):
         self.state = "читаю чат с начала эфира"
         self.on_event(f"⏪ <b>{self.label}</b>: эфир идёт уже {hms(vod['elapsed'])}. "
                       "Читаю чат с самого начала и ищу моменты…")
-        msgs = vod_chat(vod["id"], upto, self.stop)
+        def prog(f):
+            self.state = f"читаю чат с начала эфира: {int(f * 100)}%"
+        msgs = vod_chat(vod["id"], upto, self.stop, progress=prog)
         if self.stop.is_set():
             return
         if not msgs:

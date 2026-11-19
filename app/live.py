@@ -338,7 +338,7 @@ class YTChat(Chat):
 class Detector:
     """Всплеск = активность чата заметно выше обычной для этого стрима."""
 
-    def __init__(self, ratio=2.0, z=4.0, min_score=6.0, pre=20.0, post=8.0, lmin=20.0, lmax=59.0,
+    def __init__(self, ratio=2.0, z=3.0, min_score=6.0, pre=20.0, post=8.0, lmin=20.0, lmax=59.0,
                  cooldown=20.0):
         self.ratio, self.z, self.min_score = ratio, z, min_score
         self.pre, self.post, self.lmin, self.lmax, self.cooldown = pre, post, lmin, lmax, cooldown

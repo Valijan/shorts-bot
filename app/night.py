@@ -105,7 +105,11 @@ class NightRun(threading.Thread):
         self.state = f"читаю чат записи ({hms(vod['dur'])})"
         self.on_event(f"🌙 {self.idx + 1}/{len(self.logins)} <b>{login}</b>: эфир {hms(vod['dur'])}, {when}. "
                       "Читаю чат и ищу моменты…")
-        msgs = vod_chat(vod["id"], vod["dur"], self.stop_ev)
+        dur_txt = hms(vod["dur"])
+
+        def prog(f):
+            self.state = f"читаю чат записи ({dur_txt}): {int(f * 100)}%"
+        msgs = vod_chat(vod["id"], vod["dur"], self.stop_ev, progress=prog)
         if self.stop_ev.is_set():
             return 0, " — остановлено"
         if not msgs:

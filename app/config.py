@@ -58,7 +58,7 @@ LIVE_YT_POST = _float("LIVE_YT_POST", 15)  # на YouTube запись може�
 LIVE_MIN = _float("LIVE_MIN", 20)          # длина клипа, с
 LIVE_MAX = _float("LIVE_MAX", 59)
 LIVE_RATIO = _float("LIVE_RATIO", 2.0)     # всплеск = чат в N раз активнее нормы стрима
-LIVE_Z = _float("LIVE_Z", 4.0)             # и выше нормы на столько «обычных колебаний»
+LIVE_Z = _float("LIVE_Z", 3.0)             # и выше нормы на столько «обычных колебаний» (было 4 — клипов выходило мало)
 LIVE_MIN_CHAT = _float("LIVE_MIN_CHAT", 6)  # минимум разных людей за 10 с (для маленьких стримов)
 LIVE_COOLDOWN = _float("LIVE_COOLDOWN", 20)  # пауза между клипами, с
 LIVE_CHANNELS = _int("LIVE_CHANNELS", 1)   # сколько эфиров одновременно (1 = новый /live переключает)
