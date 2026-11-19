@@ -67,9 +67,16 @@ def login_window(timeout: int = 900) -> tuple[bool, str]:
         ctx = _context(p, headless=False)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(STUDIO, wait_until="domcontentloaded")
+        if cfg.YT_EMAIL and not _logged_in(page):
+            # почта уже подставлена — печатать почти ничего не нужно: «Далее» и подтверждение на телефоне
+            from urllib.parse import quote
+            page.goto("https://accounts.google.com/ServiceLogin?service=youtube&passive=true&hl=ru"
+                      f"&Email={quote(cfg.YT_EMAIL)}&login_hint={quote(cfg.YT_EMAIL)}"
+                      f"&continue={quote(STUDIO)}", wait_until="domcontentloaded")
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if _logged_in(page) and "studio.youtube.com" in page.url and "/channel/" in page.url:
+            urls = [pg.url for pg in ctx.pages]   # вход мог пройти в другой вкладке
+            if any("studio.youtube.com" in u and "/channel/" in u for u in urls):
                 name = ""
                 try:
                     name = page.title().replace("- YouTube Studio", "").strip()

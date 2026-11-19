@@ -61,3 +61,4 @@ TZ_OFFSET = _float("TZ_OFFSET", 5)          # часовой пояс для т�
 LIVE_DASH_EVERY = _int("LIVE_DASH_EVERY", 15)  # как часто обновлять табло живого режима, с
 FONTS_DIR = os.getenv("FONTS_DIR", "")      # своя папка со шрифтами субтитров (Windows: шрифты рядом с ботом)
 NIGHT_CLIPS = _int("NIGHT_CLIPS", 10)          # клипов с каждого стримера в ночном режиме
+YT_EMAIL = os.getenv("YT_EMAIL", "valijanabdullayev2000@gmail.com")   # подставляется при входе в YouTube
