@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 
 from . import ai
-from . import config as cfg
 
 log = logging.getLogger(__name__)
 

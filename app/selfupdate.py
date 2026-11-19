@@ -55,6 +55,23 @@ def update() -> bool:
     return True
 
 
+def repair_cv2():
+    """opencv-python и opencv-python-headless пишут в одну папку cv2; если версии разные
+    (5.x от scenedetect), cv2 оказывается сломан — поиск лица и раскладка стрима не работают."""
+    ok = subprocess.run([sys.executable, "-c", "import cv2; cv2.CascadeClassifier; cv2.FaceDetectorYN"],
+                        capture_output=True).returncode == 0
+    if ok:
+        return
+    print("cv2 сломан — переустанавливаю OpenCV 4.x")
+    pip = [sys.executable, "-m", "pip"]
+    subprocess.run(pip + ["uninstall", "-y", "-q", "opencv-python", "opencv-python-headless"])
+    subprocess.run(pip + ["install", "-q", "--no-cache-dir", "opencv-python-headless>=4.9,<5", "opencv-python>=4.9,<5"])
+
+
 if __name__ == "__main__":
     _rotate_log()
     update()
+    try:
+        repair_cv2()
+    except Exception as e:
+        print("проверка cv2 не удалась:", e)

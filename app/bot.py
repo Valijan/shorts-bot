@@ -862,8 +862,8 @@ async def _night_dash(bot: Bot, chat: int, run, mid: int):
             except TelegramBadRequest as e:
                 if "not found" in str(e).lower():
                     break
-            except Exception:
-                log.exception("night dash")
+            except Exception as e:   # Telegram тормозит — не страшно, обновим в следующий раз
+                log.warning("night dash: %s", type(e).__name__)
         await asyncio.sleep(cfg.LIVE_DASH_EVERY)
     try:
         await bot.edit_message_text(run.status() + "\n\n⏹ Ночной разбор завершён.", chat_id=chat, message_id=mid)
@@ -1464,6 +1464,7 @@ async def worker(bot: Bot):
         def progress(text: str):
             if STATE["cancel"]:
                 raise pipeline.Cancelled()
+            STATE["stage_t"] = time.time()   # поток жив и сообщает о себе — это не зависание
             asyncio.run_coroutine_threadsafe(set_status(text), loop)
 
         def cancelled():

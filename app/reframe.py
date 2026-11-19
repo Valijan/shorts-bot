@@ -31,8 +31,11 @@ def _detectors():
         except Exception:
             _yunet = False
     if _anime is None:
-        c = cv2.CascadeClassifier(str(MODELS / "anime_face.xml"))
-        _anime = c if not c.empty() else False
+        try:
+            c = cv2.CascadeClassifier(str(MODELS / "anime_face.xml"))
+            _anime = c if not c.empty() else False
+        except Exception:
+            _anime = False
     if _haar is None and _yunet is False:
         try:
             _haar = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -43,8 +46,6 @@ def _detectors():
 
 def _faces(frame, gray):
     """Список лиц (x_center, ширина, уверенность) в координатах кадра анализа."""
-    import cv2
-
     yunet, anime, haar = _detectors()
     out = []
     h, w = frame.shape[:2]

@@ -9,6 +9,8 @@ yt-dlp
 streamlink>=7
 anthropic>=0.40
 opencv-python-headless>=4.9,<5
+# scenedetect тянет opencv-python; 5.x без CascadeClassifier и ломает общий модуль cv2
+opencv-python>=4.9,<5
 numpy
 scenedetect>=0.6.4
 python-dotenv
