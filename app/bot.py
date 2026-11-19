@@ -1567,7 +1567,7 @@ async def worker(bot: Bot):
             await set_status("🛑 Отменено.", force=True)
         except Exception as e:
             log.exception("job failed")
-            await set_status(f"❌ Ошибка: {html.escape(str(e)[:300])}", force=True)
+            await set_status("❌ " + friendly_error(e), force=True)
         finally:
             if not session_kept and workdir:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -1640,6 +1640,26 @@ class RetryRequests(BaseRequestMiddleware):
                 log.warning("Telegram недоступен (%s), повтор через %d с", type(e).__name__, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
+
+
+def friendly_error(e: Exception) -> str:
+    """Понятный текст вместо технической простыни (подробности остаются в журнале, /log)."""
+    t = str(e)
+    low = t.lower()
+    if "ffmpeg" in low:
+        what = "Не получилось смонтировать клип"
+    elif "распознав" in low:
+        what = "Не получилось распознать речь"
+    elif any(k in low for k in ("http error", "unable to download", "yt-dlp", "streamlink", "403", "404")):
+        what = "Не получилось скачать видео — ссылка недоступна или видео закрыто"
+    elif "no space" in low or "errno 28" in low:
+        what = "На компьютере закончилось место на диске"
+    elif isinstance(e, MemoryError) or "memory" in low:
+        what = "Компьютеру не хватило памяти"
+    else:
+        first = next((ln for ln in t.splitlines() if ln.strip()), type(e).__name__)
+        return f"Ошибка: {html.escape(first[:150])}\nПодробности — /log"
+    return f"{what}. Подробности — /log"
 
 
 async def heartbeat(beat: Path, bot: Bot):

@@ -14,7 +14,11 @@ W, H = 1080, 1920
 def ass_filter(name: str) -> str:
     """Фильтр субтитров ffmpeg; если задана своя папка шрифтов — libass берёт шрифты оттуда."""
     fd = cfg.FONTS_DIR
-    return f"ass={name}" + (f":fontsdir='{Path(fd).as_posix()}'" if fd else "")
+    if not fd:
+        return f"ass={name}"
+    # «C:» в пути Windows: двоеточие внутри фильтра надо экранировать, иначе ffmpeg режет путь
+    path = Path(fd).as_posix().replace(":", "\\:")
+    return f"ass={name}:fontsdir='{path}'"
 
 def run(cmd, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
