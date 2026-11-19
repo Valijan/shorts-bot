@@ -17,8 +17,19 @@ LOAD_TIMEOUT = int(os.getenv("ASR_LOAD_TIMEOUT", 600))   # загрузка мо
 STEP_TIMEOUT = int(os.getenv("ASR_STEP_TIMEOUT", 900))   # тишина между кусками речи
 
 
-def run(path, progress=None, content="auto", log=None) -> dict:
-    """Запуск в дочернем процессе с таймаутами; при зависании — одна повторная попытка."""
+class ChildCrash(RuntimeError):
+    pass
+
+
+_BROKEN = False   # дочерний процесс на этом ПК не работает — сразу распознаём внутри бота
+
+
+def run(path, progress=None, content="auto", log=None, inproc=None) -> dict:
+    """Запуск в дочернем процессе с таймаутами; при зависании — повторная попытка,
+    при падении процесса — распознавание внутри бота (как раньше)."""
+    global _BROKEN
+    if _BROKEN and inproc:
+        return inproc()
     last_err = ""
     for attempt in (1, 2):
         try:
@@ -27,6 +38,14 @@ def run(path, progress=None, content="auto", log=None) -> dict:
             last_err = str(e)
             if log:
                 log.warning("asr: %s — попытка %d, перезапускаю распознавание", e, attempt)
+        except ChildCrash as e:
+            if log:
+                log.error("asr: %s", e)
+            if inproc:
+                _BROKEN = True
+                log and log.warning("asr: перехожу на распознавание внутри бота")
+                return inproc()
+            raise
     raise RuntimeError(f"распознавание речи зависло ({last_err})")
 
 
@@ -48,7 +67,8 @@ def _run_once(path, progress, content, log, threads: int) -> dict:
             ev.set()
         ev.set()
 
-    threading.Thread(target=reader, daemon=True).start()
+    rt = threading.Thread(target=reader, daemon=True)
+    rt.start()
     loaded, last, seen, tail = False, time.time(), 0, []
     try:
         while True:
@@ -71,8 +91,12 @@ def _run_once(path, progress, content, log, threads: int) -> dict:
                     raise RuntimeError("распознавание: " + ln[4:])
                 else:
                     tail = (tail + [ln])[-15:]
-            if p.poll() is not None and seen >= len(lines):
-                raise RuntimeError("распознавание упало: " + " | ".join(tail[-5:]))
+            if p.poll() is not None:
+                rt.join(10)   # дочитываем всё, что процесс успел напечатать перед выходом
+                if seen < len(lines):
+                    continue
+                raise ChildCrash(f"процесс распознавания завершился (код {p.returncode}): "
+                                 + " | ".join(tail[-6:]))
             if progress:
                 progress(None)   # даёт боту шанс отменить задачу
             limit = STEP_TIMEOUT if loaded else LOAD_TIMEOUT
@@ -109,6 +133,9 @@ def _child(path, content, out):
 
 
 if __name__ == "__main__":
+    import faulthandler
+    faulthandler.enable()   # если упадёт внутри C-библиотеки — хотя бы будет видно где
+    print("S", flush=True)
     try:
         _child(sys.argv[1], sys.argv[2], sys.argv[3])
     except Exception as e:
