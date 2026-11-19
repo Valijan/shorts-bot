@@ -19,18 +19,41 @@ STUDIO = "https://studio.youtube.com"
 UPLOAD = "https://www.youtube.com/upload"
 
 
+def _ensure_chromium():
+    """Свой Chromium для Playwright (≈150 МБ). Ставим один раз, если его нет."""
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                       capture_output=True, text=True, timeout=900)
+    log.info("playwright install chromium: %s %s", r.returncode, (r.stdout + r.stderr)[-300:])
+
+
 def _context(p, headless: bool):
     PROFILE.mkdir(parents=True, exist_ok=True)
     opts = dict(headless=headless, viewport=None if not headless else {"width": 1400, "height": 900},
                 locale="ru-RU", args=["--disable-blink-features=AutomationControlled", "--start-maximized"],
                 ignore_default_args=["--enable-automation"])
-    for channel in ("chrome", "msedge", None):   # настоящий Chrome Google пускает охотнее
+    errors = []
+    order = ["chrome", "msedge", "chromium", "chromium-install"]
+    last = PROFILE.parent / "yt-browser.txt"   # каким браузером в прошлый раз получилось — его первым
+    if last.exists() and last.read_text().strip() in order:
+        order.insert(0, order.pop(order.index(last.read_text().strip())))
+    for channel in order:
         try:
-            return p.chromium.launch_persistent_context(str(PROFILE), channel=channel, **opts) if channel \
-                else p.chromium.launch_persistent_context(str(PROFILE), **opts)
+            if channel == "chromium-install":   # своего Chromium нет — скачиваем и пробуем ещё раз
+                _ensure_chromium()
+                channel = "chromium"
+            prof = PROFILE if channel != "chromium" else PROFILE.parent / "yt-profile-chromium"
+            prof.mkdir(parents=True, exist_ok=True)
+            kw = dict(opts, channel=channel) if channel != "chromium" else opts
+            ctx = p.chromium.launch_persistent_context(str(prof), **kw)
+            log.info("youtube: браузер %s", channel)
+            last.write_text(channel)
+            return ctx
         except Exception as e:
-            log.info("browser %s: %s", channel, str(e)[:120])
-    raise RuntimeError("не нашёл браузер: поставь Google Chrome или выполни «python -m playwright install chromium»")
+            errors.append(f"{channel}: {str(e)[:400]}")
+            log.warning("browser %s: %s", channel, str(e)[:600])
+    raise RuntimeError("не запустился браузер для YouTube: " + " | ".join(x[:150] for x in errors))
 
 
 def _logged_in(page) -> bool:
@@ -62,7 +85,7 @@ def login_window(timeout: int = 900) -> tuple[bool, str]:
 
 def status() -> tuple[bool, str]:
     from playwright.sync_api import sync_playwright
-    if not PROFILE.exists():
+    if not PROFILE.exists() and not (PROFILE.parent / "yt-profile-chromium").exists():
         return False, "вход не выполнен"
     with sync_playwright() as p:
         ctx = _context(p, headless=True)
