@@ -21,38 +21,56 @@ class ChildCrash(RuntimeError):
     pass
 
 
-_BROKEN = False   # дочерний процесс на этом ПК не работает — сразу распознаём внутри бота
+# Варианты запуска CTranslate2: на некоторых ПК стандартный падает (0xC0000005) при загрузке модели.
+VARIANTS = [
+    {},
+    {"CT2_FORCE_CPU_ISA": "AVX2", "ASR_COMPUTE": "float32"},
+    {"CT2_FORCE_CPU_ISA": "GENERIC", "ASR_COMPUTE": "float32", "ASR_THREADS": "4"},
+    {"ASR_MODEL": "base", "CT2_FORCE_CPU_ISA": "AVX2", "ASR_COMPUTE": "float32"},
+]
+_NOSPEECH = False   # ни один вариант не работает — режем без речи (по чату и звуку), бот живёт
+
+
+def _vfile():
+    from . import config as cfg
+    return cfg.DATA_DIR / "asr-variant.txt"
 
 
 def run(path, progress=None, content="auto", log=None, inproc=None) -> dict:
-    """Запуск в дочернем процессе с таймаутами; при зависании — повторная попытка,
-    при падении процесса — распознавание внутри бота (как раньше)."""
-    global _BROKEN
-    if _BROKEN and inproc:
-        return inproc()
-    last_err = ""
-    for attempt in (1, 2):
+    """Распознавание в дочернем процессе. Падение или зависание убивает только его;
+    перебираем варианты запуска и запоминаем рабочий. Внутри бота не запускаем никогда —
+    падение CTranslate2 там роняет весь бот."""
+    global _NOSPEECH
+    if _NOSPEECH:
+        return {"lang": "en", "segments": []}
+    try:
+        start = int(_vfile().read_text().strip())
+    except Exception:
+        start = 0
+    order = [i for i in range(len(VARIANTS)) if i >= start] + [i for i in range(start)]
+    errs = []
+    for i in order:
         try:
-            return _run_once(path, progress, content, log, threads=0 if attempt == 1 else 2)
-        except TimeoutError as e:
-            last_err = str(e)
-            if log:
-                log.warning("asr: %s — попытка %d, перезапускаю распознавание", e, attempt)
-        except ChildCrash as e:
-            if log:
-                log.error("asr: %s", e)
-            if inproc:
-                _BROKEN = True
-                log and log.warning("asr: перехожу на распознавание внутри бота")
-                return inproc()
-            raise
-    raise RuntimeError(f"распознавание речи зависло ({last_err})")
+            res = _run_once(path, progress, content, log, VARIANTS[i])
+            if i != start:
+                try:
+                    _vfile().write_text(str(i))
+                except OSError:
+                    pass
+                log and log.warning("asr: рабочий вариант %d %s — запомнил", i, VARIANTS[i])
+            return res
+        except (TimeoutError, ChildCrash) as e:
+            errs.append(f"{i}: {e}")
+            log and log.error("asr: вариант %d %s не сработал: %s", i, VARIANTS[i], e)
+    _NOSPEECH = True
+    log and log.error("asr: распознавание речи не работает на этом ПК — режу без речи до перезапуска")
+    return {"lang": "en", "segments": []}
 
 
-def _run_once(path, progress, content, log, threads: int) -> dict:
+def _run_once(path, progress, content, log, variant: dict) -> dict:
     out = Path(str(path) + ".asr.json")
     out.unlink(missing_ok=True)
-    env = {**os.environ, "ASR_THREADS": str(threads)}
+    env = {**os.environ, **variant}
     p = subprocess.Popen([sys.executable, "-m", "app.asr", str(path), content, str(out)],
                          cwd=Path(__file__).resolve().parent.parent, env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -112,15 +130,16 @@ def _run_once(path, progress, content, log, threads: int) -> dict:
 def _model():
     from faster_whisper import WhisperModel
     from . import config as cfg
-    kw = dict(device=cfg.WHISPER_DEVICE, compute_type=cfg.WHISPER_COMPUTE,
+    kw = dict(device=cfg.WHISPER_DEVICE, compute_type=os.getenv("ASR_COMPUTE") or cfg.WHISPER_COMPUTE,
               download_root=str(cfg.DATA_DIR / "models"))
+    name = os.getenv("ASR_MODEL") or cfg.WHISPER_MODEL
     th = int(os.getenv("ASR_THREADS", "0") or 0)
     if th:
         kw["cpu_threads"] = th
     try:   # модель уже скачана — грузим без обращения к интернету
-        return WhisperModel(cfg.WHISPER_MODEL, local_files_only=True, **kw)
+        return WhisperModel(name, local_files_only=True, **kw)
     except Exception:
-        return WhisperModel(cfg.WHISPER_MODEL, **kw)
+        return WhisperModel(name, **kw)
 
 
 def _child(path, content, out):
