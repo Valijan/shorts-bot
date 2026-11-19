@@ -14,7 +14,10 @@ from pathlib import Path
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
+from aiogram.exceptions import (TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter,
+                                TelegramServerError)
+from aiogram.methods import GetUpdates
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
@@ -574,6 +577,13 @@ async def live_cmd(m: Message, bot: Bot):
     await start_live(m, bot, src)
 
 
+def fire(coro, loop):
+    """Запустить корутину из потока и записать ошибку в лог, если она упадёт (а не потерять молча)."""
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    fut.add_done_callback(lambda f: f.exception() and log.error("фоновая отправка не удалась: %s", f.exception()))
+    return fut
+
+
 DROPPED: list[tuple[int, int]] = []   # сообщения «Монтирую…» у выкинутых из очереди клипов
 
 
@@ -637,10 +647,10 @@ async def start_live(m: Message, bot: Bot, src: dict):
     uid, chat = m.from_user.id, m.chat.id
 
     def on_clip(path, info):  # вызывается из потока живого режима
-        asyncio.run_coroutine_threadsafe(_live_clip(bot, uid, chat, s, path, info), loop)
+        fire(_live_clip(bot, uid, chat, s, path, info), loop)
 
     def on_event(text):
-        asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
+        fire(bot.send_message(chat, text), loop)
 
     s = live.LiveSession(src, cfg.DATA_DIR / "live", on_clip, on_event, busy=queue.qsize)
     s.start()
@@ -817,10 +827,10 @@ async def night_cmd(m: Message, bot: Bot):
     uid, chat = m.from_user.id, m.chat.id
 
     def on_clip(path, info, login):
-        asyncio.run_coroutine_threadsafe(_night_clip(bot, uid, chat, login, path, info), loop)
+        fire(_night_clip(bot, uid, chat, login, path, info), loop)
 
     def on_event(text):
-        asyncio.run_coroutine_threadsafe(bot.send_message(chat, text), loop)
+        fire(bot.send_message(chat, text), loop)
 
     run = night.NightRun(logins, per, cfg.DATA_DIR / "night", on_clip, on_event, queue.qsize)
     NIGHT["run"] = run
@@ -1608,6 +1618,36 @@ async def _send_previews(bot, chat, src, clips):
 _LOCK = None
 
 
+class RetryRequests(BaseRequestMiddleware):
+    """Интернет на ПК иногда пропадает: отправки не падают, а ждут связь и повторяют (до часа).
+    Так клипы и итоги, готовые во время обрыва, доходят позже, а не теряются."""
+
+    async def __call__(self, make_request, bot, method):
+        if isinstance(method, GetUpdates):    # приём обновлений aiogram повторяет сам
+            return await make_request(bot, method)
+        t0, delay = time.time(), 3
+        while True:
+            try:
+                return await make_request(bot, method)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except (TelegramNetworkError, TelegramServerError) as e:
+                if time.time() - t0 > 3600:
+                    raise
+                log.warning("Telegram недоступен (%s), повтор через %d с", type(e).__name__, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+
+
+def clean_leftovers():
+    """После перезапуска старые задания никто не доделает — убираем их, чтобы не копились на диске."""
+    for sub in ("jobs", "night", "live"):
+        d = cfg.DATA_DIR / sub
+        if d.exists():
+            for x in d.iterdir():
+                shutil.rmtree(x, ignore_errors=True) if x.is_dir() else x.unlink(missing_ok=True)
+
+
 async def main():
     global _LOCK
     if not cfg.BOT_TOKEN:
@@ -1626,6 +1666,8 @@ async def main():
                                  timeout=900)
     from aiogram.client.default import DefaultBotProperties
     bot = Bot(cfg.BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
+    bot.session.middleware(RetryRequests())
+    clean_leftovers()
     dp = Dispatcher()
     dp.message.outer_middleware(AccessMiddleware())
     dp.callback_query.outer_middleware(AccessMiddleware())
