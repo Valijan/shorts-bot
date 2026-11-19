@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1442,13 +1443,15 @@ async def worker(bot: Bot):
     loop = asyncio.get_running_loop()
     while True:
         job = await queue.get()
-        STATE.update(busy=True, cancel=False, job=job)
+        STATE.update(busy=True, cancel=False, job=job, stage_t=time.time())
         chat, sid_msg = job["chat_id"], job["status_id"]
         last = {"t": 0.0, "text": ""}
         session_kept = False
         workdir = local_src = None
 
         async def set_status(text: str, force=False, kb=None):
+            if text != STATE.get("stage"):
+                STATE["stage_t"] = time.time()
             STATE["stage"] = text
             if text == last["text"] or (not force and time.time() - last["t"] < 3):
                 return
@@ -1570,7 +1573,7 @@ async def worker(bot: Bot):
                 shutil.rmtree(workdir, ignore_errors=True)
                 if local_src:
                     local_src.unlink(missing_ok=True)
-            STATE.update(busy=False, cancel=False, job=None, stage="", last=time.time(), warned=False)
+            STATE.update(busy=False, cancel=False, job=None, stage="", stage_t=time.time(), last=time.time(), warned=False)
             queue.task_done()
 
 
@@ -1639,6 +1642,26 @@ class RetryRequests(BaseRequestMiddleware):
                 delay = min(delay * 2, 60)
 
 
+async def heartbeat(beat: Path, bot: Bot):
+    while True:
+        try:
+            beat.touch()
+        except OSError:
+            pass
+        stuck = time.time() - STATE.get("stage_t", time.time())
+        if STATE["busy"] and stuck > 1800:   # задача 30 минут без движения — зависла в потоке
+            log.error("задача зависла (%d с без прогресса) — перезапуск", stuck)
+            job = STATE.get("job") or {}
+            try:
+                await asyncio.wait_for(bot.send_message(job.get("chat_id"), "⚠️ Задача зависла на этапе «"
+                                       + re.sub(r"<[^>]+>", "", STATE.get("stage") or "") +
+                                       "» — перезапускаю бота. Пришли видео ещё раз."), 30)
+            except Exception:
+                pass
+            os._exit(6)
+        await asyncio.sleep(20)
+
+
 def clean_leftovers():
     """После перезапуска старые задания никто не доделает — убираем их, чтобы не копились на диске."""
     for sub in ("jobs", "night", "live"):
@@ -1668,6 +1691,13 @@ async def main():
     bot = Bot(cfg.BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
     bot.session.middleware(RetryRequests())
     clean_leftovers()
+    if SUPERVISED:   # на ПК: сторож перезапустит бота, если тот намертво зависнет
+        beat = cfg.DATA_DIR / "heartbeat"
+        beat.touch()
+        subprocess.Popen([sys.executable, "-m", "app.watchdog", str(os.getpid()), str(beat)],
+                         cwd=Path(__file__).resolve().parent.parent,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        asyncio.create_task(heartbeat(beat, bot))
     dp = Dispatcher()
     dp.message.outer_middleware(AccessMiddleware())
     dp.callback_query.outer_middleware(AccessMiddleware())

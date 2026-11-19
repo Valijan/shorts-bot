@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Загрузка моделей Whisper с HuggingFace: быстрый загрузчик Xet на Windows иногда намертво
+# подвешивает весь процесс — берём обычный HTTP и ставим таймауты.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 
 def _int(name: str, default: int) -> int:
     try:
