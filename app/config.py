@@ -30,6 +30,8 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny/base/small/medium/large-v3
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")  # cpu / cuda
 WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
+# распознавание в отдельном процессе (по умолчанию на Windows): зависание не замораживает бота
+ASR_SUBPROCESS = os.getenv("ASR_SUBPROCESS", "1" if os.name == "nt" else "0") == "1"
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 ALLOWED_USERS = {

@@ -27,6 +27,15 @@ VOCAB = {
 def transcribe(path, progress=None, content: str = "auto") -> dict:
     """GPU, а если видеокарта не поддерживается — автоматически CPU."""
     global _whisper
+    if cfg.ASR_SUBPROCESS and cfg.WHISPER_DEVICE == "cpu":
+        from . import asr
+        last = [0.0]
+
+        def prog(f):   # None = «ничего нового», но даём боту проверить отмену
+            if f is not None:
+                last[0] = f
+            progress(last[0])
+        return asr.run(path, prog if progress else None, content, log)
     try:
         return _transcribe(path, progress, content)
     except Exception as e:

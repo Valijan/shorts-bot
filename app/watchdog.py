@@ -2,6 +2,7 @@
 start_bot.bat сам запустит бота заново. Запускается ботом как отдельный процесс."""
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,7 +28,16 @@ def alive(pid: int) -> bool:
         return False
 
 
+def note(beat: Path, text: str):
+    try:
+        with open(beat.parent / "watchdog.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+    except OSError:
+        pass
+
+
 def main(pid: int, beat: Path):
+    note(beat, f"сторож запущен, слежу за pid {pid}")
     time.sleep(START)   # даём боту запуститься
     last_tick = time.time()
     while alive(pid):
@@ -43,13 +53,15 @@ def main(pid: int, beat: Path):
         except OSError:
             age = 0
         if age > STALE:
-            with open(beat.parent / "watchdog.log", "a", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} бот завис ({int(age)} с без отметки) — перезапуск\n")
+            note(beat, f"бот завис ({int(age)} с без отметки) — перезапуск")
             try:
                 os.kill(pid, signal.SIGTERM)   # на Windows это TerminateProcess
-            except OSError:
-                pass
+            except OSError as e:
+                note(beat, f"не смог убить: {e}")
+            if os.name == "nt" and alive(pid):
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
             return
+    note(beat, "бот завершился — сторож выходит")
 
 
 if __name__ == "__main__":
