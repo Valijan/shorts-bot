@@ -1,5 +1,7 @@
 aiogram>=3.13,<4
 faster-whisper>=1.1
+# ctranslate2 4.5+ на части Windows-ПК падает при загрузке модели (0xC0000005)
+ctranslate2==4.4.0 ; sys_platform == "win32"
 av<14
 yt-dlp
 streamlink>=7
