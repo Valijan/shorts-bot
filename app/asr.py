@@ -106,7 +106,7 @@ def _run_once(path, progress, content, log, variant: dict) -> dict:
                     p.wait(30)
                     return json.loads(out.read_text(encoding="utf-8"))
                 elif ln.startswith("ERR "):
-                    raise RuntimeError("распознавание: " + ln[4:])
+                    raise ChildCrash("ошибка в процессе распознавания: " + ln[4:])
                 else:
                     tail = (tail + [ln])[-15:]
             if p.poll() is not None:
