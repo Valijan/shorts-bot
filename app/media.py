@@ -20,7 +20,31 @@ def ass_filter(name: str) -> str:
     path = Path(fd).as_posix().replace(":", "\\:")
     return f"ass={name}:fontsdir='{path}'"
 
+_FILE_OPT = None  # поддерживает ли ffmpeg синтаксис «-/filter_complex файл» (7.0+)
+
+
+def _file_opt_supported() -> bool:
+    """FFmpeg 8+ удалил -filter_complex_script, а до 7.0 не было «-/filter_complex».
+    Проверяем один раз реальным запуском, какой вариант понимает установленный ffmpeg."""
+    global _FILE_OPT
+    if _FILE_OPT is None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "g.txt").write_text("[0:v]null[v]")
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-f", "lavfi",
+                                "-i", "nullsrc=s=16x16:d=0.04", "-/filter_complex", "g.txt",
+                                "-map", "[v]", "-f", "null", "-"],
+                               cwd=d, capture_output=True, text=True)
+        _FILE_OPT = r.returncode == 0
+    return _FILE_OPT
+
+
+def _fix_script_opts(cmd):
+    if "-filter_complex_script" not in cmd or not _file_opt_supported():
+        return cmd
+    return ["-/filter_complex" if a == "-filter_complex_script" else a for a in cmd]
 def run(cmd, cwd=None):
+    cmd = _fix_script_opts(list(cmd))
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg error: {r.stderr[-1500:]}")
