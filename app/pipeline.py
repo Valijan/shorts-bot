@@ -47,7 +47,6 @@ def style_of(st: dict, lay: dict | None = None) -> dict:
              "censor": st.get("censor", "off") == "on", "anim": st.get("sub_anim", "pop"),
              "camp": st.get("camp_label", "")}
     if lay and lay.get("layout") == "stream":   # камера сверху, полоса с ником, геймплей
-        top = lay["cam_h"] + lay["bar_h"]
         below_bar = lay["bar_h"] and st.get("camp_label")
         style.update(banner_y=lay["cam_h"] + (lay["bar_h"] if below_bar else 0), sub_y=1360)
         if lay["bar_h"]:
