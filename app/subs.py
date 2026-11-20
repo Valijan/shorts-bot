@@ -111,7 +111,7 @@ def _chunks_from_words(words, max_words=3, max_chars=16):
     return chunks
 
 
-def _words_from_segments(segments, max_words=3):
+def _words_from_segments(segments):
     """Для переведённого текста таймингов слов нет — распределяем по длине."""
     out = []
     for seg in segments:
