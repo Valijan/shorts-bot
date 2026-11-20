@@ -35,8 +35,7 @@ def transcribe(path, progress=None, content: str = "auto") -> dict:
             if f is not None:
                 last[0] = f
             progress(last[0])
-        return asr.run(path, prog if progress else None, content, log,
-                       inproc=lambda: _transcribe(path, progress, content))
+        return asr.run(path, prog if progress else None, content, log)
     try:
         return _transcribe(path, progress, content)
     except Exception as e:
