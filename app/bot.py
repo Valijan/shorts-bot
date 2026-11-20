@@ -898,7 +898,7 @@ YT_LABELS = {"off": "выкл", "button": "кнопка под клипом", "a
 VIS_LABELS = {"PUBLIC": "публично", "UNLISTED": "по ссылке", "PRIVATE": "приватно"}
 
 
-def yt_prepare(r: dict, st: dict, A: dict) -> dict | None:
+def yt_prepare(r: dict, A: dict) -> dict | None:
     """Кладёт клип в «исходящие» для YouTube: название, описание, проверка 18+."""
     g = get_global()
     mode = g.get("yt_mode", "off")
@@ -1475,7 +1475,7 @@ async def worker(bot: Bot):
                 await bot.send_message(chat, f"Клип {r['index']} слишком большой для отправки.")
                 return
             cap = await asyncio.to_thread(caption_for, r, st, A["segments"], A["lang"])
-            yt = await asyncio.to_thread(yt_prepare, r, st, A)
+            yt = await asyncio.to_thread(yt_prepare, r, A)
             kb = None
             if yt and (yt["mode"] == "button" or yt["block"]):
                 kb = yt_kb(yt["id"], yt["adult"])
@@ -1516,7 +1516,7 @@ async def worker(bot: Bot):
                 sid = keep_session(s)
                 session_kept = True
                 if st.get("pick") == "top":
-                    await _do_top(bot, s, sid, progress, send_clip, set_status)
+                    await _do_top(s, sid, progress, send_clip, set_status)
                     continue
                 clips = await asyncio.to_thread(pipeline.choose, A, st, int(st.get("clips", 5)))
                 if not clips:
@@ -1527,7 +1527,7 @@ async def worker(bot: Bot):
                     await set_status(f"👀 Нашёл {len(clips)} моментов. Отметь нужные и жми «Монтировать».",
                                      force=True, kb=pick_kb(sid))
                     continue
-                await _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, cancelled)
+                await _do_render(s, sid, clips, progress, on_clip_factory, set_status, cancelled)
             elif job["type"] == "live":
                 workdir, src = job["workdir"], job["src"]
                 st = {**get_settings(job["uid"]), "_uid": job["uid"], "review": "off", "ranges": None}
@@ -1554,16 +1554,16 @@ async def worker(bot: Bot):
                 s["ts"] = time.time()
                 if job["type"] == "go":
                     clips = [c for i, c in enumerate(s["clips"]) if i in s["sel"]]
-                    await _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, cancelled)
+                    await _do_render(s, sid, clips, progress, on_clip_factory, set_status, cancelled)
                 elif job["type"] == "more":
                     clips = await asyncio.to_thread(pipeline.choose, s["A"], {**s["st"], "ranges": None},
                                                     3, s["used"])
                     if not clips:
                         await set_status("Больше ярких моментов не нашёл 🤷", force=True, kb=after_kb(sid))
                         continue
-                    await _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, cancelled)
+                    await _do_render(s, sid, clips, progress, on_clip_factory, set_status, cancelled)
                 elif job["type"] == "top":
-                    await _do_top(bot, s, sid, progress, send_clip, set_status)
+                    await _do_top(s, sid, progress, send_clip, set_status)
         except pipeline.Cancelled:
             await set_status("🛑 Отменено.", force=True)
         except Exception as e:
@@ -1578,7 +1578,7 @@ async def worker(bot: Bot):
             queue.task_done()
 
 
-async def _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, cancelled):
+async def _do_render(s, sid, clips, progress, on_clip_factory, set_status, cancelled):
     st, A = s["st"], s["A"]
     res = await asyncio.to_thread(pipeline.render, s["src"], s["workdir"], st, A, clips, progress,
                                   on_clip_factory(st, A), cancelled)
@@ -1586,7 +1586,7 @@ async def _do_render(bot, s, sid, clips, progress, on_clip_factory, set_status, 
     await set_status(f"✅ Готово! {len(res)} шортс(ов). Что дальше?", force=True, kb=after_kb(sid))
 
 
-async def _do_top(bot, s, sid, progress, send_clip, set_status):
+async def _do_top(s, sid, progress, send_clip, set_status):
     st, A = s["st"], s["A"]
     r = await asyncio.to_thread(pipeline.compile_top, s["src"], s["workdir"], st, A, progress)
     r.update(index=1, total=1)
