@@ -36,7 +36,7 @@ def _vfile():
     return cfg.DATA_DIR / "asr-variant.txt"
 
 
-def run(path, progress=None, content="auto", log=None, inproc=None) -> dict:
+def run(path, progress=None, content="auto", log=None) -> dict:
     """Распознавание в дочернем процессе. Падение или зависание убивает только его;
     перебираем варианты запуска и запоминаем рабочий. Внутри бота не запускаем никогда —
     падение CTranslate2 там роняет весь бот."""
