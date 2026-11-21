@@ -34,7 +34,7 @@ class Cancelled(Exception):
 
 
 def _use_llm():
-    return bool(cfg.ANTHROPIC_API_KEY)
+    return cfg.LLM_ON
 
 
 def style_of(st: dict, lay: dict | None = None) -> dict:

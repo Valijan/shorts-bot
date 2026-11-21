@@ -26,6 +26,10 @@ BOT_API_URL = os.getenv("BOT_API_URL", "").rstrip("/")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+# вместо Claude можно ключ Gemini (Google AI Studio, есть бесплатный уровень); если заданы оба — берём Claude
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")   # пусто — бот сам выберет свежую модель Flash
+LLM_ON = bool(ANTHROPIC_API_KEY or GEMINI_API_KEY)
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")  # tiny/base/small/medium/large-v3
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")  # cpu / cuda

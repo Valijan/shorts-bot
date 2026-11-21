@@ -179,10 +179,9 @@ def cam_height(cam, src_w, src_h) -> int:
 
 def _director(clip: Path, duration: float, content: str):
     """ИИ-монтажник: Claude смотрит кадры и говорит, где действие и широкий ли план."""
-    if not cfg.ANTHROPIC_API_KEY or duration < 3:
+    if not cfg.LLM_ON or duration < 3:
         return None
     import cv2
-    import anthropic
 
     step = max(1.0, duration / 30)
     want = [i * step for i in range(int(duration / step) + 1)]
@@ -208,11 +207,8 @@ def _director(clip: Path, duration: float, content: str):
 как доля ширины 0..1, и wide=true, если действие разбросано по всему экрану (тимфайт) и окно его обрежет.
 Ответь ТОЛЬКО JSON: {{"frames":[{{"i":0,"x":0.5,"wide":false}}]}}"""})
     try:
-        client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
-        msg = client.messages.create(model=cfg.CLAUDE_MODEL, max_tokens=2000,
-                                     messages=[{"role": "user", "content": content_blocks}])
-        from .ai import _json
-        data = _json("".join(b.text for b in msg.content if getattr(b, "type", "") == "text")) or {}
+        from .ai import _json, llm
+        data = _json(llm(content_blocks, 2000)) or {}
         res = []
         for f in data.get("frames", []):
             i = int(f["i"])

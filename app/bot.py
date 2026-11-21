@@ -19,7 +19,7 @@ from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import (TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter,
                                 TelegramServerError)
 from aiogram.methods import GetUpdates
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
 
@@ -89,8 +89,8 @@ TITLES = {"content": "Что за видео", "pick": "Как резать", "c
           "jumpcut": "Убирать паузы в речи", "teaser": "Тизер: яркий момент в начале",
           "pbar": "Полоска прогресса внизу", "loop": "Петля (конец → начало)",
           "censor": "Мат (для монетизации)", "sub_anim": "Анимация субтитров",
-          "vision": "Поиск килов по кадрам (нужен ключ Claude)",
-          "director": "Камера в играх (ИИ нужен ключ Claude)", "autostop": "Автостоп pod'а без дела"}
+          "vision": "Поиск килов по кадрам (нужен ключ ИИ — /aikey)",
+          "director": "Камера в играх (нужен ключ ИИ — /aikey)", "autostop": "Автостоп pod'а без дела"}
 MENUS = {
     "cut": ("✂️ Нарезка", ["content", "pick", "clips", "length", "confirm", "vision"]),
     "look": ("🎨 Оформление", ["mode", "director", "title", "subs", "sub_words", "sub_anim", "sub_color", "sub_size", "sub_pos", "censor"]),
@@ -319,6 +319,7 @@ MENU_COMMANDS = [
     ("settings", "Настройки нарезки"), ("queue", "Очередь задач"), ("cancel", "Отменить текущую задачу"),
     ("campaigns", "Кампании блогеров"), ("addcampaign", "Добавить кампанию"), ("music", "Фоновая музыка"),
     ("watermark", "Ник на видео: /watermark @ник"), ("stop", "Остановить всю работу"),
+    ("aikey", "Ключ ИИ (Gemini или Claude): /aikey ключ"),
     ("update", "Обновить бота и перезапустить"), ("log", "Последние строки лога"),
     ("id", "Мой Telegram ID"), ("help", "Справка"),
 ]
@@ -533,6 +534,55 @@ async def log_cmd(m: Message):
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
     text = "\n".join(lines)[-3500:]
     await m.answer(f"<pre>{html.escape(text) or 'пусто'}</pre>")
+
+
+def _env_set(key: str, value: str):
+    """Записывает KEY=value в .env (заменяет строку или дописывает)."""
+    path = Path(__file__).resolve().parent.parent / ".env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    lines = [ln for ln in lines if not ln.startswith(key + "=")] + [f"{key}={value}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.environ[key] = value
+
+
+@router.message(Command("aikey"))
+async def aikey_cmd(m: Message, command: CommandObject):
+    key = (command.args or "").strip()
+    if not key:
+        now = ai.llm_name() or "не подключён"
+        return await m.answer(
+            f"🧠 ИИ сейчас: <b>{now}</b>.\n\nБесплатно: возьми ключ Gemini на aistudio.google.com/apikey "
+            "(кнопка Create API key) и пришли сюда:\n<code>/aikey AIza…</code>\n"
+            "Ключ Claude (sk-ant-…) тоже подойдёт. <code>/aikey off</code> — отключить ИИ.")
+    try:
+        await m.delete()   # ключ не должен висеть в переписке
+    except Exception:
+        pass
+    if key.lower() == "off":
+        for k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+            _env_set(k, "")
+        cfg.GEMINI_API_KEY = cfg.ANTHROPIC_API_KEY = ""
+        cfg.LLM_ON = False
+        return await m.answer("🧠 ИИ отключён.")
+    saved = (cfg.ANTHROPIC_API_KEY, cfg.GEMINI_API_KEY)
+    if key.startswith("sk-ant-"):
+        cfg.ANTHROPIC_API_KEY = key
+    elif key.startswith("AIza") or len(key) >= 30:
+        cfg.GEMINI_API_KEY, cfg.ANTHROPIC_API_KEY = key, ""   # при обоих ключах берётся Claude — убираем его
+    else:
+        return await m.answer("Это не похоже на ключ. Ключ Gemini начинается с <code>AIza</code>, Claude — с <code>sk-ant-</code>.")
+    cfg.LLM_ON = True
+    msg = await m.answer("🧠 Проверяю ключ…")
+    try:
+        reply = await asyncio.to_thread(ai.llm, "Ответь одним словом: работает", 50)
+    except Exception as e:
+        cfg.ANTHROPIC_API_KEY, cfg.GEMINI_API_KEY = saved
+        cfg.LLM_ON = bool(cfg.ANTHROPIC_API_KEY or cfg.GEMINI_API_KEY)
+        return await msg.edit_text(f"❌ Ключ не подошёл: {html.escape(str(e)[:300])}")
+    _env_set("ANTHROPIC_API_KEY", cfg.ANTHROPIC_API_KEY)
+    _env_set("GEMINI_API_KEY", cfg.GEMINI_API_KEY)
+    await msg.edit_text(f"✅ ИИ подключён: <b>{ai.llm_name()}</b> (ответ: {html.escape(reply.strip()[:40])}). "
+                        "Теперь бот сам выбирает лучшие моменты в видео, пишет заголовки и находит убийства в играх.")
 
 
 # ---------- Живой режим ----------
@@ -1508,7 +1558,7 @@ async def worker(bot: Bot):
                         src = workdir / "source.mp4"
                         await bot.download_file(tg_file.file_path, destination=src)
                 st = {**get_settings(job["uid"]), **job.get("over", {}), "_uid": job["uid"]}
-                if st.get("review") == "on" and not cfg.ANTHROPIC_API_KEY:
+                if st.get("review") == "on" and not cfg.LLM_ON:
                     await bot.send_message(chat, "⚠️ Для «Обзора» нужен ключ Claude API. Режу без комментариев.")
                 A = await asyncio.to_thread(pipeline.analyze, src, st, progress)
                 s = {"uid": job["uid"], "chat": chat, "src": src, "workdir": workdir, "st": st, "A": A,
@@ -1744,7 +1794,7 @@ async def main():
         log.info("Меню команд обновлено: %d команд", len(cmds))
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)
-    log.info("Bot started (local API: %s, LLM: %s)", LOCAL, bool(cfg.ANTHROPIC_API_KEY))
+    log.info("Bot started (local API: %s, LLM: %s)", LOCAL, ai.llm_name() or False)
     if SUPERVISED:   # домашний ПК: сообщаем, что бот снова в строю (после перезагрузки или /update)
         for u in cfg.ALLOWED_USERS:
             try:

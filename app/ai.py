@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import time
 
 import numpy as np
 
@@ -87,17 +88,106 @@ def _transcribe(path, progress=None, content: str = "auto") -> dict:
     return {"lang": info.language, "segments": out}
 
 
-# ---------- Claude ----------
+# ---------- ИИ: Claude или Gemini ----------
 
-def _claude(prompt: str, max_tokens: int = 4000) -> str:
-    import anthropic
+def llm_name() -> str:
+    return "Claude" if cfg.ANTHROPIC_API_KEY else ("Gemini" if cfg.GEMINI_API_KEY else "")
 
-    client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
-    msg = client.messages.create(
-        model=cfg.CLAUDE_MODEL, max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
+def llm(blocks, max_tokens: int = 4000) -> str:
+    """Запрос к ИИ. blocks — строка или список блоков в формате Claude
+    ({"type":"text","text":…} / {"type":"image","source":{"media_type","data"}})."""
+    if isinstance(blocks, str):
+        blocks = [{"type": "text", "text": blocks}]
+    if cfg.ANTHROPIC_API_KEY:
+        import anthropic
+        client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
+        msg = client.messages.create(model=cfg.CLAUDE_MODEL, max_tokens=max_tokens,
+                                     messages=[{"role": "user", "content": blocks}])
+        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    if cfg.GEMINI_API_KEY:
+        return _gemini(blocks, max_tokens)
+    raise RuntimeError("не задан ключ ИИ (ANTHROPIC_API_KEY или GEMINI_API_KEY)")
+
+
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+_gem_model = None
+_gem_bad: set = set()   # модели, которых у этого ключа нет (404)
+
+
+def _gem_req(path: str, body: dict | None = None, timeout: int = 120) -> dict:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(f"{_GEMINI_URL}/{path}", data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json",
+                                          "x-goog-api-key": cfg.GEMINI_API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Gemini {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from None
+
+
+def _gemini_model() -> str:
+    """Модель из GEMINI_MODEL, иначе самая свежая стабильная Flash (без lite/preview/image/tts)."""
+    global _gem_model
+    if cfg.GEMINI_MODEL:
+        return cfg.GEMINI_MODEL.removeprefix("models/")
+    if _gem_model:
+        return _gem_model
+    names = []
+    try:
+        for m in _gem_req("models?pageSize=200", timeout=30).get("models", []):
+            n = m.get("name", "").removeprefix("models/")
+            if "generateContent" in (m.get("supportedGenerationMethods") or []):
+                names.append(n)
+    except Exception as e:
+        log.warning("gemini: список моделей не получен: %s", e)
+
+    def ver(n):
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return float(m.group(1)) if m else 0.0
+    bad = ("lite", "preview", "exp", "image", "tts", "audio", "live", "thinking", "embedding")
+    names = [n for n in names if n not in _gem_bad]
+    good = [n for n in names if "flash" in n and not any(x in n for x in bad)]
+    good = good or [n for n in names if "flash" in n and "image" not in n and "tts" not in n]
+    _gem_model = max(good, key=ver) if good else "gemini-2.5-flash"
+    log.info("gemini: модель %s", _gem_model)
+    return _gem_model
+
+
+def _gemini(blocks: list, max_tokens: int) -> str:
+    global _gem_model
+    parts = []
+    for b in blocks:
+        if b.get("type") == "text":
+            parts.append({"text": b["text"]})
+        elif b.get("type") == "image":
+            src = b["source"]
+            parts.append({"inline_data": {"mime_type": src.get("media_type", "image/jpeg"), "data": src["data"]}})
+    body = {"contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"maxOutputTokens": max(max_tokens * 2, 8192), "temperature": 0.4}}
+    for attempt in range(4):
+        try:
+            data = _gem_req(f"models/{_gemini_model()}:generateContent", body)
+            break
+        except RuntimeError as e:
+            # 429 — бесплатный лимит в минуту: ждём и пробуем ещё; 404 — модели нет, выбираем заново
+            if "Gemini 404" in str(e) and not cfg.GEMINI_MODEL and attempt < 3:
+                _gem_bad.add(_gem_model)
+                _gem_model = None
+                continue
+            if "Gemini 429" not in str(e) and "Gemini 503" not in str(e) or attempt == 3:
+                raise
+            time.sleep(15 * (attempt + 1))
+    else:
+        raise RuntimeError("Gemini не ответил")
+    cand = (data.get("candidates") or [{}])[0]
+    return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
+
+
+def _claude(prompt: str, max_tokens: int = 4000) -> str:   # старое имя — для совместимости
+    return llm(prompt, max_tokens)
 
 
 def _json(text: str):
@@ -449,7 +539,7 @@ def _publish_text(clip: dict, segments, content: str, lang: str = "ru") -> dict:
             "desc": f"{_TYPE_WORD.get(clip.get('type'), 'лучший момент').capitalize()}. "
                     f"Подписывайся, чтобы не пропустить новые! 🔔",
             "tags": tags}
-    if not cfg.ANTHROPIC_API_KEY:
+    if not cfg.LLM_ON:
         return base
     said = " ".join(s["t"] for s in segments
                     if s["e"] > clip["start"] and s["s"] < clip["end"])[:1500]
@@ -475,7 +565,7 @@ def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
     import base64
     import subprocess
 
-    if not cfg.ANTHROPIC_API_KEY or len(score) < 5:
+    if not cfg.LLM_ON or len(score) < 5:
         return []
     order = [int(t) for t in np.argsort(score)[::-1]]
     picks = []
@@ -502,12 +592,7 @@ def vision_events(src, score, content: str, k: int = 36) -> list[dict]:
 Maniac, Savage, Wiped Out, Shut Down; в PUBG: «вы убили/нокаут», kill feed с вашим ником).
 Ответь ТОЛЬКО JSON: {{"kills":[{{"i":0,"label":"SAVAGE","w":10}}]}} — только кадры с убийством;
 w: 3 обычный кил, 4 double, 6 triple, 8 maniac, 10 savage, 7 wiped out/клатч."""})
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
-    msg = client.messages.create(model=cfg.CLAUDE_MODEL, max_tokens=1500,
-                                 messages=[{"role": "user", "content": blocks}])
-    data = _json("".join(b.text for b in msg.content if getattr(b, "type", "") == "text")) or {}
+    data = _json(llm(blocks, 1500)) or {}
     out = []
     for e in data.get("kills", []):
         try:

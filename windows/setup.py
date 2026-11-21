@@ -98,7 +98,7 @@ def main():
             token = input("Вставь токен бота от @BotFather и нажми Enter: ").strip()
         users = input(f"Telegram ID владельца [{OWNER}] (Enter — оставить): ").strip() or OWNER
         env.write_text("\n".join([
-            f"BOT_TOKEN={token}", f"ALLOWED_USERS={users}", "ANTHROPIC_API_KEY=",
+            f"BOT_TOKEN={token}", f"ALLOWED_USERS={users}", "ANTHROPIC_API_KEY=", "GEMINI_API_KEY=",
             "WHISPER_MODEL=small", "WHISPER_DEVICE=cpu", "WHISPER_COMPUTE=int8",
             f"DATA_DIR={(DIR / 'data').as_posix()}", f"FONTS_DIR={fonts.as_posix()}",
             "LIVE_QUALITY=720p60,720p,best", "SHOW_TITLE=1", "WATERMARK=", ""]), encoding="utf-8")
