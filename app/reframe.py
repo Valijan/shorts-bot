@@ -107,22 +107,27 @@ def _analyze(clip: Path):
 
 
 def _smooth(ts, xs, crop_w, max_x):
-    """Плавная «операторская» камера: мёртвая зона, сглаживание, лимит скорости."""
+    """Спокойная «операторская» камера: внутри плана по возможности стоим на месте,
+    едем только если человек ушёл далеко, и едем медленно и плавно."""
     xs = np.array(xs, dtype=np.float32)
-    if len(xs) >= 5:  # медианный фильтр убирает случайные выбросы
-        pad = np.pad(xs, 2, mode="edge")
-        xs = np.array([np.median(pad[i:i + 5]) for i in range(len(xs))])
-    dead = crop_w * 0.08
-    max_step = crop_w * 0.9 / FPS_SAMPLE  # не быстрее ~0.9 ширины кадра в секунду
-    cam = [float(xs[0])]
+    if len(xs) >= 7:  # медианный фильтр убирает выбросы детектора (мелькнувшее чужое лицо)
+        pad = np.pad(xs, 3, mode="edge")
+        xs = np.array([np.median(pad[i:i + 7]) for i in range(len(xs))])
+    # человек в пределах ~трети кадра весь план — ставим камеру статично (так снимают люди)
+    if xs.max() - xs.min() < crop_w * 0.35:
+        return [(0.0, float(np.clip(np.median(xs) - crop_w / 2, 0, max_x)))]
+    dead = crop_w * 0.18
+    max_step = crop_w * 0.4 / FPS_SAMPLE  # не быстрее ~0.4 ширины кадра в секунду
+    cam, vel = [float(xs[0])], 0.0
     for x in xs[1:]:
         c = cam[-1]
         d = x - c
-        if abs(d) > dead:
-            c += float(np.clip((d - np.sign(d) * dead) * 0.45, -max_step, max_step))
+        target = (d - np.sign(d) * dead) * 0.25 if abs(d) > dead else 0.0
+        vel = vel * 0.6 + target * 0.4            # разгон и торможение без рывков
+        c += float(np.clip(vel, -max_step, max_step))
         cam.append(c)
     cam = np.clip(np.array(cam) - crop_w / 2, 0, max_x)
-    if cam.max() - cam.min() < crop_w * 0.1:  # почти не двигается — ставим статично
+    if cam.max() - cam.min() < crop_w * 0.12:
         return [(0.0, float(np.median(cam)))]
     return list(zip(ts, cam.tolist()))
 
@@ -172,14 +177,9 @@ def plan(clip: Path, cuts: list[float], duration: float, src_w: int, src_h: int,
         elif ss:
             moving = [s for s in ss if s["mx"] is not None and s["mc"] > 0.35]
             if len(moving) / len(ss) >= 0.5 or mode == "crop":
+                # без лиц камера за «движением» плавает туда-сюда — ставим по центру действия
                 kind = "track"
-                prev = None
-                for s in ss:
-                    if s["mx"] is not None and s["mc"] > 0.35:
-                        prev = s["mx"]
-                    if prev is not None:
-                        ts.append(s["t"] - a)
-                        xs.append(prev * k)
+                xs, ts = [float(np.median([s["mx"] for s in moving] or [src_w * scale / 2])) * k], [0.0]
         if kind == "fit" and not (ss and with_faces):
             kind = "track"  # нет лиц и явного движения — всё равно заполняем вертикаль
             # центр «интереса»: среднее движение по сцене, иначе прошлая позиция/центр

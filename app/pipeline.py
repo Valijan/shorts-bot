@@ -177,6 +177,7 @@ def render(src: Path, workdir: Path, st: dict, A: dict, clips: list[dict], progr
         media.extract(src, c["start"], c["end"], raw)
         seg_src, c = segments, dict(c)
         keep = _keep_intervals(c, segments, st, info)
+        keep = media.snap_keep(keep) if keep else keep
         if keep:
             progress(f"✂️ Убираю паузы {i}/{len(clips)}…")
             try:

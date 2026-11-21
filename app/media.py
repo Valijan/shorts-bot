@@ -110,6 +110,9 @@ def extract(src: Path, start: float, end: float, dst: Path):
     run([
         "ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(src),
         "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
+        # ровно 30 кадров/с: у скачанных видео бывает «плавающая» частота, из-за неё после
+        # вырезания пауз картинка уезжала от звука и субтитров всё сильнее к концу клипа
+        "-vf", f"fps={FPS}",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
         "-c:a", "aac", "-b:a", "192k", str(dst),
     ])
@@ -225,14 +228,31 @@ def motion_per_sec(path: Path) -> np.ndarray:
     return a.reshape(n, fps).max(axis=1)
 
 
+FPS = 30
+
+
+def snap_keep(keep: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Границы кусков — точно по кадрам (1/30 с): тогда картинка, звук и субтитры режутся одинаково."""
+    out = []
+    for a, b in keep:
+        a, b = round(a * FPS) / FPS, round(b * FPS) / FPS
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        elif b > a:
+            out.append((a, b))
+    return out
+
+
 def jumpcut(src: Path, keep: list[tuple[float, float]], dst: Path):
-    """Оставляет только куски keep (секунды), остальное (паузы) вырезает."""
-    expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+    """Оставляет только куски keep (секунды, уже выровненные snap_keep), паузы вырезает."""
+    half = 0.5 / FPS   # кадр с t ровно на границе b не берём — иначе каждый стык добавлял лишний кадр
+    expr = "+".join(f"between(t,{a - half:.4f},{b - half:.4f})" for a, b in keep)
+    aexpr = "+".join(f"between(t,{a:.4f},{b:.4f})" for a, b in keep)
     run([
         "ffmpeg", "-y", "-v", "error", "-i", str(src),
-        "-vf", f"select='{expr}',setpts=N/FRAME_RATE/TB",
-        "-af", f"aselect='{expr}',asetpts=N/SR/TB",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
+        "-vf", f"select='{expr}',setpts=N/{FPS}/TB",
+        "-af", f"aselect='{aexpr}',asetpts=N/SR/TB",
+        "-r", str(FPS), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
         str(dst),
     ])
 
