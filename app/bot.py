@@ -590,7 +590,7 @@ async def set_ai_key(m: Message, key: str):
     cfg.LLM_ON = True
     msg = await m.answer("🧠 Проверяю ключ…")
     try:
-        reply = await asyncio.to_thread(ai.llm, "Ответь одним словом: работает", 50)
+        reply = await asyncio.to_thread(ai.check_key)
     except Exception as e:
         is_gem = bool(cfg.GEMINI_API_KEY) and not cfg.ANTHROPIC_API_KEY
         log.warning("aikey: ключ не подошёл: %s", str(e)[:400])
@@ -606,7 +606,7 @@ async def set_ai_key(m: Message, key: str):
         return await msg.edit_text(f"❌ Ключ не подошёл. {html.escape(why)}")
     _env_set("ANTHROPIC_API_KEY", cfg.ANTHROPIC_API_KEY)
     _env_set("GEMINI_API_KEY", cfg.GEMINI_API_KEY)
-    await msg.edit_text(f"✅ ИИ подключён: <b>{ai.llm_name()}</b> (ответ: {html.escape(reply.strip()[:40])}). "
+    await msg.edit_text(f"✅ ИИ подключён: <b>{reply}</b>, ключ сохранён. "
                         "Теперь бот сам выбирает лучшие моменты в видео, пишет заголовки и находит убийства в играх.")
 
 

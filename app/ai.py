@@ -128,6 +128,8 @@ def _gem_req(path: str, body: dict | None = None, timeout: int = 120) -> dict:
             return json.loads(r.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Gemini {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from None
+    except (TimeoutError, OSError) as e:   # сюда же urllib.error.URLError и socket.timeout
+        raise RuntimeError(f"Gemini 504: нет ответа ({e})") from None
 
 
 def _gemini_candidates() -> list[str]:
@@ -173,7 +175,7 @@ def _gemini(blocks: list, max_tokens: int) -> str:
     for model in models:
         for attempt in range(3):
             try:
-                data = _gem_req(f"models/{model}:generateContent", body)
+                data = _gem_req(f"models/{model}:generateContent", body, timeout=90)
             except RuntimeError as e:
                 last, t = e, str(e)
                 # ключ/страна/выключенный API — модель не поможет, сразу ошибка
@@ -185,7 +187,7 @@ def _gemini(blocks: list, max_tokens: int) -> str:
                     log.warning("gemini: %s не подходит: %s", model, t[:160])
                     _gem_bad.add(model)
                     break
-                if ("Gemini 503" in t or "Gemini 500" in t):
+                if ("Gemini 503" in t or "Gemini 500" in t or "Gemini 504" in t):
                     # модель перегружена — одна короткая попытка, потом берём следующую модель
                     if attempt == 0:
                         time.sleep(5)
@@ -207,6 +209,16 @@ def _gemini(blocks: list, max_tokens: int) -> str:
     raise last or RuntimeError("Gemini: нет доступной модели")
 
 
+def check_key() -> str:
+    """Быстрая проверка ключа: Claude — коротким запросом, Gemini — списком моделей (секунды,
+    не зависит от загрузки моделей). Возвращает название ИИ или бросает ошибку."""
+    if cfg.ANTHROPIC_API_KEY:
+        llm("Ответь одним словом: да", 20)
+        return "Claude"
+    _gem_req("models?pageSize=5", timeout=30)
+    return "Gemini"
+
+
 def gemini_error_text(e: Exception) -> str:
     """Понятное объяснение ошибки ключа Gemini."""
     t = str(e)
@@ -216,6 +228,8 @@ def gemini_error_text(e: Exception) -> str:
         return "Google не пускает к Gemini API из этой сети/страны."
     if "SERVICE_DISABLED" in t or "has not been used" in t:
         return "В проекте этого ключа выключен Gemini API. Создай ключ именно на aistudio.google.com/apikey."
+    if "Gemini 504" in t or "timed out" in t:
+        return "Google не ответил вовремя (сеть или перегрузка). Попробуй ещё раз."
     if "Gemini 503" in t or "Gemini 500" in t:
         return "Ключ рабочий, но серверы Google сейчас перегружены."
     if "Gemini 429" in t:
