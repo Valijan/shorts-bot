@@ -218,10 +218,20 @@ def _x_expr(keys) -> str:
             thin.append((t, x))
     if thin[-1] != keys[-1]:
         thin.append(keys[-1])
-    expr = str(thin[-1][1])
-    for (t0, x0), (t1, x1) in reversed(list(zip(thin, thin[1:]))):
-        expr = f"if(lt(t,{t1}),{x0}+({x1 - x0})*(t-{t0})/{max(t1 - t0, 0.01)},{expr})"
-    return f"if(lt(t,{thin[0][0]}),{thin[0][1]},{expr})"
+    segs = list(zip(thin, thin[1:]))
+    if not segs:
+        return str(thin[0][1])
+
+    # сбалансированное дерево if(): глубина ~log2(n). Цепочка из if() в ряд для клипа длиннее ~45 с
+    # превышала предел вложенности выражений ffmpeg (100) — и раскладка стрима падала.
+    def build(lo: int, hi: int) -> str:
+        if lo == hi:
+            (t0, x0), (t1, x1) = segs[lo]
+            return f"{x0}+({x1 - x0})*(t-{t0})/{max(t1 - t0, 0.01)}"
+        mid = (lo + hi) // 2
+        return f"if(lt(t,{segs[mid][1][0]}),{build(lo, mid)},{build(mid + 1, hi)})"
+    return (f"if(lt(t,{thin[0][0]}),{thin[0][1]},"
+            f"if(gte(t,{thin[-1][0]}),{thin[-1][1]},{build(0, len(segs) - 1)}))")
 
 
 def render(clip: Path, out: Path, ass_name: str, shots: list[dict], src_w: int, src_h: int):

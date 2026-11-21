@@ -22,11 +22,14 @@ class ChildCrash(RuntimeError):
 
 
 # Варианты запуска CTranslate2: на некоторых ПК стандартный падает (0xC0000005) при загрузке модели.
+# Падения 0xC0000005 на Windows — из-за старой системной msvcp140.dll (нужна 14.40+): её роняют и
+# CTranslate2, и onnxruntime (фильтр тишины VAD). Поэтому в процессе распознавания заранее грузим
+# свежую msvcp140 из пакета msvc-runtime; запасной вариант — без VAD (onnxruntime не нужен).
 VARIANTS = [
     {},
-    {"CT2_FORCE_CPU_ISA": "AVX2", "ASR_COMPUTE": "float32"},
-    {"CT2_FORCE_CPU_ISA": "GENERIC", "ASR_COMPUTE": "float32", "ASR_THREADS": "4"},
-    {"ASR_MODEL": "base", "CT2_FORCE_CPU_ISA": "AVX2", "ASR_COMPUTE": "float32"},
+    {"ASR_VAD": "0"},
+    {"ASR_VAD": "0", "CT2_FORCE_CPU_ISA": "AVX2", "ASR_COMPUTE": "float32"},
+    {"ASR_VAD": "0", "ASR_MODEL": "base", "CT2_FORCE_CPU_ISA": "GENERIC", "ASR_COMPUTE": "float32"},
 ]
 _NOSPEECH = False   # ни один вариант не работает — режем без речи (по чату и звуку), бот живёт
 
@@ -142,7 +145,37 @@ def _model():
         return WhisperModel(name, **kw)
 
 
+def _preload_msvc():
+    """Грузим свежую msvcp140.dll до CTranslate2/onnxruntime: дальше Windows отдаёт им уже
+    загруженную по имени, а не старую из System32. Печатаем, какая в итоге используется."""
+    if os.name != "nt":
+        return
+    import ctypes
+    base = Path(sys.prefix)
+    for name in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll",
+                 "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "concrt140.dll"):
+        for d in (base, base / "Scripts"):
+            f = d / name
+            if f.exists():
+                try:
+                    ctypes.WinDLL(str(f))
+                except OSError as e:
+                    print(f"D не загрузил {name}: {e}", flush=True)
+                break
+    try:
+        k = ctypes.windll.kernel32
+        k.GetModuleHandleW.restype = ctypes.c_void_p
+        h = k.GetModuleHandleW("msvcp140.dll")
+        buf = ctypes.create_unicode_buffer(512)
+        if h:
+            k.GetModuleFileNameW(ctypes.c_void_p(h), buf, 512)
+        print(f"D msvcp140: {buf.value or 'не загружена'}", flush=True)
+    except Exception:
+        pass
+
+
 def _child(path, content, out):
+    _preload_msvc()
     from . import ai
     ai._whisper = _model()
     print("L", flush=True)

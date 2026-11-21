@@ -1,5 +1,6 @@
 """Распознавание речи (Whisper), выбор моментов (Claude или алгоритм), перевод."""
 import json
+import os
 import logging
 import re
 import time
@@ -72,12 +73,13 @@ def _transcribe(path, progress=None, content: str = "auto") -> dict:
     audio = _load_audio(path)
     vocab = VOCAB.get(content)
     extra = {"initial_prompt": vocab, "hotwords": vocab} if vocab else {}
+    vad = os.getenv("ASR_VAD", "1") != "0"   # фильтр тишины (onnxruntime); на части ПК падает
     try:
         segments, info = _whisper.transcribe(
-            audio, word_timestamps=True, vad_filter=True, beam_size=1, **extra)
+            audio, word_timestamps=True, vad_filter=vad, beam_size=1, **extra)
     except TypeError:  # старая faster-whisper без hotwords
         segments, info = _whisper.transcribe(
-            audio, word_timestamps=True, vad_filter=True, beam_size=1,
+            audio, word_timestamps=True, vad_filter=vad, beam_size=1,
             **({"initial_prompt": vocab} if vocab else {}))
     out = []
     for s in segments:

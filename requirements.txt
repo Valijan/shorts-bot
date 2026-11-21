@@ -4,6 +4,9 @@ faster-whisper>=1.1
 ctranslate2==4.4.0 ; sys_platform == "win32"
 # ctranslate2 4.4 импортирует pkg_resources, а в новых setuptools его убрали
 setuptools<81 ; sys_platform == "win32"
+# свежая msvcp140.dll (14.40+): со старой системной CTranslate2 и onnxruntime падают 0xC0000005
+msvc-runtime ; sys_platform == "win32"
+onnxruntime==1.19.2 ; sys_platform == "win32"
 av<14
 yt-dlp
 streamlink>=7
