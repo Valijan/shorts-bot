@@ -1439,7 +1439,9 @@ def ytdl(url: str, outdir: Path, progress=None) -> Path:
     def hook(d):
         if not progress or d.get("status") != "downloading":
             return
-        done, total = d.get("downloaded_bytes") or 0, d.get("total_bytes") or d.get("total_bytes_estimate")
+        # для HLS yt-dlp отдаёт размер оценкой (float) — приводим к целым
+        done = int(d.get("downloaded_bytes") or 0)
+        total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
         try:
             if total:
                 progress(f"⬇️ Скачиваю видео… {done * 100 // total}% ({done >> 20} из {total >> 20} МБ)")
