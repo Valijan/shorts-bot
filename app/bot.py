@@ -19,6 +19,7 @@ from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import (TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter,
                                 TelegramServerError)
 from aiogram.methods import GetUpdates
+from magic_filter import RegexpMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, InputMediaPhoto, Message)
@@ -545,10 +546,24 @@ def _env_set(key: str, value: str):
     os.environ[key] = value
 
 
-@router.message(Command("aikey"))
+KEY_RE = re.compile(r"(AIza[0-9A-Za-z_\-]{30,}|sk-ant-[0-9A-Za-z_\-]{20,})")
+
+
+@router.message(F.text.regexp(KEY_RE, mode=RegexpMode.SEARCH))
+async def aikey_pasted(m: Message):
+    """Ключ прислали как угодно — без команды, с лишним текстом, с большой буквы: всё равно ставим."""
+    log.info("aikey: ключ найден в сообщении")
+    await set_ai_key(m, KEY_RE.search(m.text).group(1))
+
+
+@router.message(Command("aikey", ignore_case=True))
 async def aikey_cmd(m: Message, command: CommandObject):
     key = (command.args or "").strip().split()[0] if (command.args or "").strip() else ""
     log.info("aikey: команда получена (%s)", "с ключом" if key else "без ключа")
+    await set_ai_key(m, key)
+
+
+async def set_ai_key(m: Message, key: str):
     if not key:
         now = ai.llm_name() or "не подключён"
         return await m.answer(
@@ -1247,6 +1262,8 @@ async def on_link(m: Message, bot: Bot):
 
 @router.message(F.text)
 async def other(m: Message):
+    t = m.text or ""
+    log.info("текст без команды: %r… (%d симв.)", t[:8], len(t))
     await m.answer("Пришли видеофайл или ссылку на видео. /help — подсказка, /settings — настройки.")
 
 
