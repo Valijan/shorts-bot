@@ -594,6 +594,12 @@ async def set_ai_key(m: Message, key: str):
     except Exception as e:
         is_gem = bool(cfg.GEMINI_API_KEY) and not cfg.ANTHROPIC_API_KEY
         log.warning("aikey: ключ не подошёл: %s", str(e)[:400])
+        if is_gem and any(c in str(e) for c in ("Gemini 503", "Gemini 500", "Gemini 429")):
+            # Google ключ принял, просто сейчас перегружен или лимит — сохраняем, бот повторит позже сам
+            _env_set("ANTHROPIC_API_KEY", "")
+            _env_set("GEMINI_API_KEY", cfg.GEMINI_API_KEY)
+            return await msg.edit_text("✅ Ключ Gemini принят и сохранён. Серверы Google сейчас перегружены — "
+                                       "бот будет повторять запросы сам и переключаться между моделями.")
         cfg.ANTHROPIC_API_KEY, cfg.GEMINI_API_KEY = saved
         cfg.LLM_ON = bool(cfg.ANTHROPIC_API_KEY or cfg.GEMINI_API_KEY)
         why = ai.gemini_error_text(e) if is_gem else str(e)[:300]

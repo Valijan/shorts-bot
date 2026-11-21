@@ -185,7 +185,14 @@ def _gemini(blocks: list, max_tokens: int) -> str:
                     log.warning("gemini: %s не подходит: %s", model, t[:160])
                     _gem_bad.add(model)
                     break
-                if ("Gemini 429" in t or "Gemini 503" in t or "Gemini 500" in t) and attempt < 2:
+                if ("Gemini 503" in t or "Gemini 500" in t):
+                    # модель перегружена — одна короткая попытка, потом берём следующую модель
+                    if attempt == 0:
+                        time.sleep(5)
+                        continue
+                    log.warning("gemini: %s перегружена, пробую другую", model)
+                    break
+                if "Gemini 429" in t and attempt < 2:
                     time.sleep(20 * (attempt + 1))   # лимит в минуту — ждём
                     continue
                 raise
@@ -209,6 +216,8 @@ def gemini_error_text(e: Exception) -> str:
         return "Google не пускает к Gemini API из этой сети/страны."
     if "SERVICE_DISABLED" in t or "has not been used" in t:
         return "В проекте этого ключа выключен Gemini API. Создай ключ именно на aistudio.google.com/apikey."
+    if "Gemini 503" in t or "Gemini 500" in t:
+        return "Ключ рабочий, но серверы Google сейчас перегружены."
     if "Gemini 429" in t:
         return "Бесплатный лимит Gemini сейчас исчерпан. Попробуй через минуту, или ключ без бесплатного уровня."
     if "Gemini 403" in t:
