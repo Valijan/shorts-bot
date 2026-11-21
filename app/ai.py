@@ -130,13 +130,10 @@ def _gem_req(path: str, body: dict | None = None, timeout: int = 120) -> dict:
         raise RuntimeError(f"Gemini {e.code}: {e.read().decode('utf-8', 'replace')[:300]}") from None
 
 
-def _gemini_model() -> str:
-    """Модель из GEMINI_MODEL, иначе самая свежая стабильная Flash (без lite/preview/image/tts)."""
-    global _gem_model
+def _gemini_candidates() -> list[str]:
+    """Какие модели пробовать: GEMINI_MODEL, иначе свежие Flash из списка ключа + известные имена."""
     if cfg.GEMINI_MODEL:
-        return cfg.GEMINI_MODEL.removeprefix("models/")
-    if _gem_model:
-        return _gem_model
+        return [cfg.GEMINI_MODEL.removeprefix("models/")]
     names = []
     try:
         for m in _gem_req("models?pageSize=200", timeout=30).get("models", []):
@@ -149,13 +146,15 @@ def _gemini_model() -> str:
     def ver(n):
         m = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
         return float(m.group(1)) if m else 0.0
-    bad = ("lite", "preview", "exp", "image", "tts", "audio", "live", "thinking", "embedding")
-    names = [n for n in names if n not in _gem_bad]
-    good = [n for n in names if "flash" in n and not any(x in n for x in bad)]
-    good = good or [n for n in names if "flash" in n and "image" not in n and "tts" not in n]
-    _gem_model = max(good, key=ver) if good else "gemini-2.5-flash"
-    log.info("gemini: модель %s", _gem_model)
-    return _gem_model
+    bad = ("preview", "exp", "image", "tts", "audio", "live", "thinking", "embedding", "robotics", "computer")
+    flash = sorted((n for n in names if "flash" in n and not any(x in n for x in bad)),
+                   key=lambda n: (ver(n), "lite" not in n), reverse=True)
+    full = [n for n in flash if "lite" not in n] + [n for n in flash if "lite" in n]
+    out = []
+    for n in full + ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.0-flash"]:
+        if n not in out and n not in _gem_bad:
+            out.append(n)
+    return out[:8]
 
 
 def _gemini(blocks: list, max_tokens: int) -> str:
@@ -169,23 +168,52 @@ def _gemini(blocks: list, max_tokens: int) -> str:
             parts.append({"inline_data": {"mime_type": src.get("media_type", "image/jpeg"), "data": src["data"]}})
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"maxOutputTokens": max(max_tokens * 2, 8192), "temperature": 0.4}}
-    for attempt in range(4):
-        try:
-            data = _gem_req(f"models/{_gemini_model()}:generateContent", body)
-            break
-        except RuntimeError as e:
-            # 429 — бесплатный лимит в минуту: ждём и пробуем ещё; 404 — модели нет, выбираем заново
-            if "Gemini 404" in str(e) and not cfg.GEMINI_MODEL and attempt < 3:
-                _gem_bad.add(_gem_model)
-                _gem_model = None
-                continue
-            if "Gemini 429" not in str(e) and "Gemini 503" not in str(e) or attempt == 3:
+    models = [_gem_model] if _gem_model else _gemini_candidates()
+    last = None
+    for model in models:
+        for attempt in range(3):
+            try:
+                data = _gem_req(f"models/{model}:generateContent", body)
+            except RuntimeError as e:
+                last, t = e, str(e)
+                # ключ/страна/выключенный API — модель не поможет, сразу ошибка
+                if any(x in t for x in ("API_KEY_INVALID", "API key not valid", "location is not supported",
+                                        "SERVICE_DISABLED", "PERMISSION_DENIED", "has not been used")):
+                    raise
+                # нет такой модели или у бесплатного уровня на неё лимит 0 — берём следующую
+                if "Gemini 404" in t or "Gemini 400" in t or ("Gemini 429" in t and "limit: 0" in t):
+                    log.warning("gemini: %s не подходит: %s", model, t[:160])
+                    _gem_bad.add(model)
+                    break
+                if ("Gemini 429" in t or "Gemini 503" in t or "Gemini 500" in t) and attempt < 2:
+                    time.sleep(20 * (attempt + 1))   # лимит в минуту — ждём
+                    continue
                 raise
-            time.sleep(15 * (attempt + 1))
-    else:
-        raise RuntimeError("Gemini не ответил")
-    cand = (data.get("candidates") or [{}])[0]
-    return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
+            if model != _gem_model:
+                _gem_model = model
+                log.info("gemini: модель %s", model)
+            cand = (data.get("candidates") or [{}])[0]
+            return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", [])
+                           if not p.get("thought"))
+        if _gem_model == model:
+            _gem_model = None
+    raise last or RuntimeError("Gemini: нет доступной модели")
+
+
+def gemini_error_text(e: Exception) -> str:
+    """Понятное объяснение ошибки ключа Gemini."""
+    t = str(e)
+    if "API_KEY_INVALID" in t or "API key not valid" in t:
+        return "Google говорит, что ключ неверный. Скопируй его заново целиком (начинается с AIza)."
+    if "location is not supported" in t:
+        return "Google не пускает к Gemini API из этой сети/страны."
+    if "SERVICE_DISABLED" in t or "has not been used" in t:
+        return "В проекте этого ключа выключен Gemini API. Создай ключ именно на aistudio.google.com/apikey."
+    if "Gemini 429" in t:
+        return "Бесплатный лимит Gemini сейчас исчерпан. Попробуй через минуту, или ключ без бесплатного уровня."
+    if "Gemini 403" in t:
+        return "Google запретил доступ для этого ключа (403)."
+    return "Ошибка Gemini: " + t[:250]
 
 
 def _claude(prompt: str, max_tokens: int = 4000) -> str:   # старое имя — для совместимости

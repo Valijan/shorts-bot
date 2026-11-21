@@ -547,7 +547,8 @@ def _env_set(key: str, value: str):
 
 @router.message(Command("aikey"))
 async def aikey_cmd(m: Message, command: CommandObject):
-    key = (command.args or "").strip()
+    key = (command.args or "").strip().split()[0] if (command.args or "").strip() else ""
+    log.info("aikey: команда получена (%s)", "с ключом" if key else "без ключа")
     if not key:
         now = ai.llm_name() or "не подключён"
         return await m.answer(
@@ -576,9 +577,12 @@ async def aikey_cmd(m: Message, command: CommandObject):
     try:
         reply = await asyncio.to_thread(ai.llm, "Ответь одним словом: работает", 50)
     except Exception as e:
+        is_gem = bool(cfg.GEMINI_API_KEY) and not cfg.ANTHROPIC_API_KEY
+        log.warning("aikey: ключ не подошёл: %s", str(e)[:400])
         cfg.ANTHROPIC_API_KEY, cfg.GEMINI_API_KEY = saved
         cfg.LLM_ON = bool(cfg.ANTHROPIC_API_KEY or cfg.GEMINI_API_KEY)
-        return await msg.edit_text(f"❌ Ключ не подошёл: {html.escape(str(e)[:300])}")
+        why = ai.gemini_error_text(e) if is_gem else str(e)[:300]
+        return await msg.edit_text(f"❌ Ключ не подошёл. {html.escape(why)}")
     _env_set("ANTHROPIC_API_KEY", cfg.ANTHROPIC_API_KEY)
     _env_set("GEMINI_API_KEY", cfg.GEMINI_API_KEY)
     await msg.edit_text(f"✅ ИИ подключён: <b>{ai.llm_name()}</b> (ответ: {html.escape(reply.strip()[:40])}). "
